@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v0.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Video From Hell
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: VideoFromHell
+
+      - name: Read release lock
+        id: release-lock
+        working-directory: VideoFromHell
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          lock = json.load(open("release-lock.json", encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"catastrophe_commit={lock['catastrophe_commit']}\n")
+              output.write(f"jawaka_commit={lock['jawaka_commit']}\n")
+              output.write(f"toolchain={lock['mlp1_toolchain_image']}\n")
+          PY
+
+      - name: Checkout pinned Catastrophe
+        uses: actions/checkout@v4
+        with:
+          repository: Utility-Muffin-Research-Kitchen/Catastrophe
+          ref: ${{ steps.release-lock.outputs.catastrophe_commit }}
+          path: Catastrophe
+
+      - name: Checkout pinned Jawaka
+        uses: actions/checkout@v4
+        with:
+          repository: Utility-Muffin-Research-Kitchen/Jawaka
+          ref: ${{ steps.release-lock.outputs.jawaka_commit }}
+          path: Jawaka
+
+      - name: Validate tag and metadata
+        working-directory: VideoFromHell
+        run: |
+          ./scripts/pakrat-metadata-check.py
+          version="$(python3 -c 'import json; print(json.load(open("pak/pak.json"))["pak_version"])')"
+          test "$GITHUB_REF_NAME" = "v$version"
+
+      - name: Run host tests
+        working-directory: VideoFromHell
+        run: make test
+
+      - name: Build and validate exact MLP1 package
+        working-directory: VideoFromHell
+        env:
+          MLP1_TOOLCHAIN_IMAGE: ${{ steps.release-lock.outputs.toolchain }}
+        run: make package-smoke
+
+      - name: Audit dynamic dependencies
+        working-directory: VideoFromHell
+        env:
+          TOOLCHAIN: ${{ steps.release-lock.outputs.toolchain }}
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/VideoFromHell/build/mlp1/package/VideoFromHell.pak/bin:/artifact:ro" \
+            "$TOOLCHAIN" \
+            aarch64-buildroot-linux-gnu-readelf -d /artifact/videofromhell | \
+            tee build/mlp1/READELF.txt
+          grep -F "Shared library: [libSDL2-2.0.so.0]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libasound.so.2]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libavformat.so.58]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libavcodec.so.58]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libavutil.so.56]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libswresample.so.3]" build/mlp1/READELF.txt
+          grep -F "Shared library: [libswscale.so.5]" build/mlp1/READELF.txt
+          grep -F "Shared library: [librockchip_mpp.so.1]" build/mlp1/READELF.txt
+
+      - name: Create draft release
+        working-directory: VideoFromHell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact="build/mlp1/VideoFromHell.pak.zip"
+          checksum_file="build/mlp1/SHA256SUMS"
+          notes="build/mlp1/release-notes.md"
+          sha256sum "$artifact" > "$checksum_file"
+          printf '# Video From Hell %s\n\nInternal package validated for Miniloong Pocket 1.\n\n## SHA-256\n\n```\n' "$GITHUB_REF_NAME" > "$notes"
+          cat "$checksum_file" >> "$notes"
+          printf '```\n' >> "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            "$artifact" \
+            "$checksum_file" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft \
+            --verify-tag \
+            --title "Video From Hell $GITHUB_REF_NAME" \
+            --notes-file "$notes"
