@@ -10,13 +10,28 @@ MLP1_BIN     := ports/mlp1/pak/bin/videofromhell
 PAK_VERSION  := $(shell python3 -c 'import json; print(json.load(open("pak/pak.json"))["pak_version"])')
 
 CJSON_DIR ?= ../Jawaka/third_party/cjson
+STUB_SOURCES := third_party/ffmpeg/stub/vfh_avformat_stub.c \
+	third_party/ffmpeg/stub/vfh_avcodec_stub.c \
+	third_party/ffmpeg/stub/vfh_avutil_stub.c \
+	third_party/ffmpeg/stub/vfh_swresample_stub.c \
+	third_party/ffmpeg/stub/vfh_swscale_stub.c \
+	third_party/mpp/stub/vfh_mpp_stub.c
 
-.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 test pakrat-metadata-check sources-test resume-test srt-test clean
+.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test resume-test srt-test clean
 
-test: pakrat-metadata-check sources-test resume-test srt-test
+test: pakrat-metadata-check stubs-test sources-test resume-test srt-test
 
 pakrat-metadata-check:
 	@python3 scripts/pakrat-metadata-check.py
+
+stubs-test:
+	@mkdir -p build/tests/stubs
+	@set -e; for source in $(STUB_SOURCES); do \
+		object="build/tests/stubs/$$(basename "$${source%.c}").o"; \
+		$(CC) -std=c11 -Wall -Wextra -Werror \
+			-Ithird_party/ffmpeg/include -Ithird_party/mpp/include \
+			-c "$$source" -o "$$object"; \
+	done
 
 sources-test:
 	@mkdir -p build/tests

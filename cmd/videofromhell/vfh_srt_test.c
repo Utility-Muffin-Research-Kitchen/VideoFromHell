@@ -73,6 +73,11 @@ int main(void) {
     assert(vfh_srt_parse("not a subtitle file at all\n\nreally not\n") == NULL);
     assert(vfh_srt_parse("") == NULL);
     assert(vfh_srt_parse(NULL) == NULL);
+    /* Truncated BOM prefixes are still valid NUL-terminated inputs. The
+       short-circuit BOM check must stop at the terminator rather than reading
+       beyond either string. */
+    assert(vfh_srt_parse("\xEF") == NULL);
+    assert(vfh_srt_parse("\xEF\xBB") == NULL);
     /* A timing line with no text is not a cue. */
     assert(vfh_srt_parse("1\n00:00:01,000 --> 00:00:02,000\n\n") == NULL);
     /* NULL-safe accessors. */

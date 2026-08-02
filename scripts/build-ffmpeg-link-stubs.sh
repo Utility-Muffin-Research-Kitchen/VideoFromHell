@@ -11,7 +11,8 @@ docker run --rm -v "$WORKSPACE":/workspace -w /workspace/VideoFromHell "$IMAGE" 
   stub=third_party/ffmpeg/stub
   mpp_stub=third_party/mpp/stub
   build_stub() {
-    "$toolchain" -shared -fPIC -Wl,-soname,"$2" -o "$1" "$3"
+    "$toolchain" -std=c11 -Wall -Wextra -Werror -shared -fPIC \
+      -Ithird_party/ffmpeg/include -Wl,-soname,"$2" -o "$1" "$3"
   }
   build_stub "$stub/libavformat.so.58" libavformat.so.58 "$stub/vfh_avformat_stub.c"
   build_stub "$stub/libavcodec.so.58" libavcodec.so.58 "$stub/vfh_avcodec_stub.c"

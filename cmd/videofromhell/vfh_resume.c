@@ -20,7 +20,7 @@ static bool vfh_resume_dir(char *out, size_t n) {
     if (!base || !base[0]) base = getenv("SHARED_USERDATA_PATH");
     if (!base || !base[0]) return false;
     if ((size_t)snprintf(out, n, "%s/VideoFromHell", base) >= n) return false;
-    mkdir(out, 0777);   /* best-effort; may already exist */
+    mkdir(out, 0755);   /* best-effort; may already exist */
     return true;
 }
 

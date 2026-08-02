@@ -15,8 +15,16 @@ int main(void) {
 
     const char *film = "/mnt/sdcard/Videos/film.mkv";
 
-    /* Nothing stored yet. */
+    /* Nothing stored yet. Keep the app directory non-world-writable even when
+       the launcher inherited a completely permissive umask. */
+    mode_t previous_umask = umask(0);
     assert(vfh_resume_get(film) == 0.0);
+    char app_dir[1024];
+    snprintf(app_dir, sizeof(app_dir), "%s/VideoFromHell", base);
+    struct stat app_dir_stat;
+    assert(stat(app_dir, &app_dir_stat) == 0);
+    assert((app_dir_stat.st_mode & 0777) == 0755);
+    umask(previous_umask);
 
     /* A position inside the film round-trips. */
     vfh_resume_set(film, 615.0, 3600.0);
