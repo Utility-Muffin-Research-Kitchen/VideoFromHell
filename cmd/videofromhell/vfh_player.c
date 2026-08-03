@@ -31,6 +31,13 @@
 #define VFH_PACKET_QUEUE_ITEMS 96
 #define VFH_FRAME_QUEUE_ITEMS 6
 
+typedef enum {
+    VFH_AUDIO_ROUTE_SPEAKER = 0,
+    VFH_AUDIO_ROUTE_HEADSET,
+    VFH_AUDIO_ROUTE_HDMI,
+    VFH_AUDIO_ROUTE_BLUETOOTH,
+} vfh_audio_route;
+
 typedef struct vfh_packet_item {
     AVPacket *packet;
     unsigned long generation;
@@ -90,8 +97,8 @@ struct vfh_player {
     bool video_thread_started;
     bool audio_thread_started;
     snd_pcm_t *pcm;
-    bool current_bluetooth;
-    atomic_bool desired_bluetooth;
+    vfh_audio_route current_audio_route;
+    atomic_int desired_audio_route;
     atomic_bool audio_reopen_pending;
     pthread_mutex_t audio_notice_mutex;
     char audio_notice[128];
@@ -672,8 +679,15 @@ static bool vfh_open_decoder(AVFormatContext *format, int stream_index,
     return true;
 }
 
-static bool vfh_output_is_bluetooth(const char *output) {
-    return output && strcasecmp(output, "BLUETOOTH") == 0;
+static vfh_audio_route vfh_audio_route_from_name(const char *output) {
+    if (output && strcasecmp(output, "BLUETOOTH") == 0) return VFH_AUDIO_ROUTE_BLUETOOTH;
+    if (output && strcasecmp(output, "HEADSET") == 0) return VFH_AUDIO_ROUTE_HEADSET;
+    if (output && strcasecmp(output, "HDMI") == 0) return VFH_AUDIO_ROUTE_HDMI;
+    return VFH_AUDIO_ROUTE_SPEAKER;
+}
+
+static bool vfh_audio_route_is_bluetooth(vfh_audio_route route) {
+    return route == VFH_AUDIO_ROUTE_BLUETOOTH;
 }
 
 static bool vfh_open_pcm(vfh_player *player, bool bluetooth, snd_pcm_t **out_pcm) {
@@ -701,8 +715,9 @@ static void vfh_set_audio_notice(vfh_player *player, const char *notice) {
  * while the UI applies live Jawaka status updates. */
 static bool vfh_reopen_audio_output(vfh_player *player) {
     if (!atomic_exchange(&player->audio_reopen_pending, false)) return false;
-    bool desired_bluetooth = atomic_load(&player->desired_bluetooth);
-    if (desired_bluetooth == player->current_bluetooth) return false;
+    vfh_audio_route desired_route = (vfh_audio_route)atomic_load(&player->desired_audio_route);
+    if (desired_route == player->current_audio_route) return false;
+    bool desired_bluetooth = vfh_audio_route_is_bluetooth(desired_route);
 
     snd_pcm_t *replacement = NULL;
     bool actual_bluetooth = desired_bluetooth;
@@ -721,7 +736,10 @@ static bool vfh_reopen_audio_output(vfh_player *player) {
         snd_pcm_close(player->pcm);
     }
     player->pcm = replacement;
-    player->current_bluetooth = actual_bluetooth;
+    player->current_audio_route = actual_bluetooth ? VFH_AUDIO_ROUTE_BLUETOOTH
+                                                   : desired_bluetooth
+                                                         ? VFH_AUDIO_ROUTE_SPEAKER
+                                                         : desired_route;
     return true;
 }
 
@@ -738,13 +756,14 @@ static bool vfh_open_audio_output(vfh_player *player) {
                                            player->audio_codec->sample_fmt,
                                            (int)player->audio_rate, 0, NULL);
     if (!player->resampler || swr_init(player->resampler) < 0) return false;
-    bool desired_bluetooth = atomic_load(&player->desired_bluetooth);
+    vfh_audio_route desired_route = (vfh_audio_route)atomic_load(&player->desired_audio_route);
+    bool desired_bluetooth = vfh_audio_route_is_bluetooth(desired_route);
     if (!vfh_open_pcm(player, desired_bluetooth, &player->pcm)) {
         if (!desired_bluetooth || !vfh_open_pcm(player, false, &player->pcm)) return false;
         vfh_set_audio_notice(player, "Bluetooth output is unavailable; using system output.");
-        player->current_bluetooth = false;
+        player->current_audio_route = VFH_AUDIO_ROUTE_SPEAKER;
     } else {
-        player->current_bluetooth = desired_bluetooth;
+        player->current_audio_route = desired_route;
     }
     return true;
 }
@@ -762,7 +781,7 @@ vfh_player *vfh_player_create(void) {
     atomic_init(&player->generation, 1);
     const char *output = getenv("JAWAKA_AUDIO_OUTPUT");
     if (!output || !output[0]) output = getenv("UMRK_AUDIO_OUTPUT");
-    atomic_init(&player->desired_bluetooth, vfh_output_is_bluetooth(output));
+    atomic_init(&player->desired_audio_route, vfh_audio_route_from_name(output));
     atomic_init(&player->audio_reopen_pending, false);
     pthread_mutex_init(&player->state_mutex, NULL);
     pthread_mutex_init(&player->seek_mutex, NULL);
@@ -879,8 +898,8 @@ bool vfh_player_is_paused(const vfh_player *player) {
 
 void vfh_player_set_audio_output(vfh_player *player, const char *output) {
     if (!player) return;
-    bool bluetooth = vfh_output_is_bluetooth(output);
-    if (atomic_exchange(&player->desired_bluetooth, bluetooth) != bluetooth)
+    vfh_audio_route route = vfh_audio_route_from_name(output);
+    if (atomic_exchange(&player->desired_audio_route, (int)route) != (int)route)
         atomic_store(&player->audio_reopen_pending, true);
 }
 
