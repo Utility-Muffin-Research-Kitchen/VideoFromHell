@@ -69,6 +69,10 @@ typedef bool (*vfh_library_cancelled_fn)(void *opaque);
 
 typedef enum {
     VFH_LIBRARY_SCAN_COMPLETE = 0,
+    /* Usable results, but at least one directory could not be opened. The
+     * enumeration is committed and pruning is suppressed for the affected
+     * source, so an unreadable folder is never mistaken for a deletion. */
+    VFH_LIBRARY_SCAN_PARTIAL,
     VFH_LIBRARY_SCAN_CANCELLED,
     VFH_LIBRARY_SCAN_FAILED,
 } vfh_library_scan_result;

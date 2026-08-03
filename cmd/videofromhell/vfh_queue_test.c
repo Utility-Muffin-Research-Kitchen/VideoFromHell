@@ -44,13 +44,10 @@ int main(void) {
     expect_path(&queue, 1, "Game-part2.mp4");
     expect_path(&queue, 2, "Films/Two.mkv");
 
-    assert(vfh_queue_move(&queue, 2, -1));
-    assert(!vfh_queue_move(&queue, 0, -1));
-    expect_path(&queue, 0, "Films/One.mp4");
-    expect_path(&queue, 1, "Films/Two.mkv");
-    expect_path(&queue, 2, "Game-part2.mp4");
-    assert(vfh_queue_remove(&queue, 1));
+    assert(vfh_queue_remove(&queue, 2));
+    assert(!vfh_queue_remove(&queue, 2));
     assert(queue.count == 2);
+    expect_path(&queue, 0, "Films/One.mp4");
     expect_path(&queue, 1, "Game-part2.mp4");
 
     assert(vfh_queue_save(&queue));

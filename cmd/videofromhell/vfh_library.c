@@ -579,6 +579,7 @@ typedef struct {
     void *cancel_opaque;
     bool cancelled_scan;
     bool failed;
+    bool unreadable;
 } vfh_library_scan_context;
 
 static bool vfh_library_scan_cancelled(vfh_library_scan_context *context) {
@@ -595,7 +596,11 @@ static void vfh_library_scan_directory(vfh_library_scan_context *context,
         depth > VFH_LIBRARY_SCAN_DEPTH || vfh_library_scan_cancelled(context)) return;
     DIR *dir = opendir(directory);
     if (!dir) {
-        context->failed = true;
+        /* A permission or I/O failure on one folder is a local problem, not a
+         * reason to discard the other card's library. Record it so the caller
+         * can skip pruning: files under an unreadable folder were never seen
+         * this generation and must not be mistaken for deletions. */
+        context->unreadable = true;
         return;
     }
     struct dirent *entry;
@@ -672,20 +677,28 @@ static vfh_library_scan_result vfh_library_scan_root(
     vfh_library_scan_directory(&context, root, "", 0);
     if (context.cancelled_scan) return VFH_LIBRARY_SCAN_CANCELLED;
     if (context.failed) {
-        vfh_library_error(error, error_size, "Video library is too large or a folder could not be read.");
+        vfh_library_error(error, error_size, "Video library is too large to index.");
         return VFH_LIBRARY_SCAN_FAILED;
     }
-    for (size_t i = 0; i < library->count;) {
-        vfh_library_item *item = &library->items[i];
-        if (item->content_kind == content_kind && item->source_index == source_index &&
-            item->seen_generation != generation) {
-            vfh_library_remove_index(library, i);
-            continue;
+    /* Prune only after a complete enumeration of this source (§4.1): an
+     * incomplete walk cannot tell a deleted file from an unreadable folder. */
+    if (!context.unreadable) {
+        for (size_t i = 0; i < library->count;) {
+            vfh_library_item *item = &library->items[i];
+            if (item->content_kind == content_kind && item->source_index == source_index &&
+                item->seen_generation != generation) {
+                vfh_library_remove_index(library, i);
+                continue;
+            }
+            i++;
         }
-        i++;
     }
     if (content_kind == VFH_CONTENT_RECORDING)
         vfh_library_group_recordings(library, generation);
+    if (context.unreadable) {
+        vfh_library_error(error, error_size, "Some folders could not be read; showing what is available.");
+        return VFH_LIBRARY_SCAN_PARTIAL;
+    }
     return VFH_LIBRARY_SCAN_COMPLETE;
 }
 
@@ -705,21 +718,33 @@ vfh_library_scan_result vfh_library_scan_cancellable(
     }
     for (size_t i = 0; i < working.count; i++) working.items[i].available = false;
     vfh_library_scan_result result = VFH_LIBRARY_SCAN_COMPLETE;
+    bool partial = false;
     for (int i = 0; i < video_sources->count; i++) {
         const vfh_source *source = &video_sources->items[i];
         if (!source->available) continue;  /* absent sources retain cached records */
         result = vfh_library_scan_root(&working, VFH_CONTENT_VIDEO, i, source->root, false,
                                        cancelled, cancel_opaque, error, error_size);
+        /* One partly readable card must not cost the other card its library. */
+        if (result == VFH_LIBRARY_SCAN_PARTIAL) {
+            partial = true;
+            result = VFH_LIBRARY_SCAN_COMPLETE;
+        }
         if (result != VFH_LIBRARY_SCAN_COMPLETE) break;
     }
     if (result == VFH_LIBRARY_SCAN_COMPLETE) {
         result = vfh_library_scan_root(&working, VFH_CONTENT_RECORDING, 0, recordings_path,
                                        true, cancelled, cancel_opaque, error, error_size);
+        if (result == VFH_LIBRARY_SCAN_PARTIAL) {
+            partial = true;
+            result = VFH_LIBRARY_SCAN_COMPLETE;
+        }
     }
     if (result == VFH_LIBRARY_SCAN_COMPLETE) {
         qsort(working.items, working.count, sizeof(*working.items), vfh_library_compare);
         vfh_library_destroy(library);
         *library = working;
+        if (partial) return VFH_LIBRARY_SCAN_PARTIAL;
+        if (error && error_size) error[0] = '\0';
     } else {
         vfh_library_destroy(&working);
     }
@@ -728,9 +753,12 @@ vfh_library_scan_result vfh_library_scan_cancellable(
 
 bool vfh_library_scan(vfh_library *library, const vfh_sources *video_sources,
                       const char *recordings_path, char *error, size_t error_size) {
-    return vfh_library_scan_cancellable(library, video_sources, recordings_path,
-                                        NULL, NULL, error, error_size) ==
-           VFH_LIBRARY_SCAN_COMPLETE;
+    /* A partial scan still commits usable results; `error` carries the reason
+     * so the browser can say so without pretending the library is empty. */
+    vfh_library_scan_result result =
+        vfh_library_scan_cancellable(library, video_sources, recordings_path,
+                                     NULL, NULL, error, error_size);
+    return result == VFH_LIBRARY_SCAN_COMPLETE || result == VFH_LIBRARY_SCAN_PARTIAL;
 }
 
 static bool vfh_library_store_path(char *out, size_t out_size) {

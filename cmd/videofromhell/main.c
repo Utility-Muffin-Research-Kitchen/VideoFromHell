@@ -608,7 +608,10 @@ static void *vfh_rescan_thread(void *opaque) {
         &worker->result, &worker->sources, worker->recordings_path,
         vfh_rescan_cancelled, worker, error, sizeof(error));
     bool cancelled = scan == VFH_LIBRARY_SCAN_CANCELLED || vfh_rescan_cancelled(worker);
-    bool succeeded = scan == VFH_LIBRARY_SCAN_COMPLETE && !cancelled;
+    /* A partial scan is a usable library plus a warning, not a failure: one
+       unreadable folder must not leave the browser empty. */
+    bool succeeded = (scan == VFH_LIBRARY_SCAN_COMPLETE ||
+                      scan == VFH_LIBRARY_SCAN_PARTIAL) && !cancelled;
     if (succeeded) {
         vfh_catalog_probe_missing_metadata(&worker->result, &worker->sources,
                                            worker->recordings_path, &worker->cancel);
@@ -665,7 +668,7 @@ static bool vfh_rescan_finish(vfh_browser *browser, bool wait) {
            failed to the person who requested the rescan. */
         vfh_clear_poster(browser);
         browser->poster_retry_pending = true;
-        vfh_set_message(browser, "Library rescan complete.");
+        vfh_set_message(browser, worker->error[0] ? worker->error : "Library rescan complete.");
         return true;
     }
     vfh_library_destroy(&worker->result);

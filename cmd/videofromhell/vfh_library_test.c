@@ -227,6 +227,53 @@ int main(void) {
     vfh_library_destroy(&corrupt);
     vfh_library_destroy(&library);
 
+    /* An unreadable folder is a local problem. It must not discard the other
+       card's library, and its unseen files must not be pruned as deletions. */
+    char locked_base[1024], locked_v1[1024], locked_v2[1024], locked_sub[1024];
+    char locked_userdata[1024], locked_list[2100];
+    snprintf(locked_base, sizeof(locked_base), "%s/partial", base);
+    make_dir(locked_base);
+    snprintf(locked_v1, sizeof(locked_v1), "%s/Videos1", locked_base);
+    snprintf(locked_v2, sizeof(locked_v2), "%s/Videos2", locked_base);
+    snprintf(locked_userdata, sizeof(locked_userdata), "%s/userdata", locked_base);
+    make_dir(locked_v1); make_dir(locked_v2); make_dir(locked_userdata);
+    setenv("USERDATA_PATH", locked_userdata, 1);
+    snprintf(path, sizeof(path), "%s/Good.mp4", locked_v1); make_file(path, "good");
+    snprintf(path, sizeof(path), "%s/AlsoGood.mp4", locked_v2); make_file(path, "good2");
+    snprintf(locked_sub, sizeof(locked_sub), "%s/Locked", locked_v2); make_dir(locked_sub);
+    snprintf(path, sizeof(path), "%s/Inside.mp4", locked_sub); make_file(path, "inside");
+    snprintf(locked_list, sizeof(locked_list), "%s:%s", locked_v1, locked_v2);
+    vfh_sources locked_sources;
+    assert(vfh_sources_parse(&locked_sources, locked_list, error, sizeof(error)));
+    vfh_library locked;
+    vfh_library_init(&locked);
+    assert(vfh_library_scan(&locked, &locked_sources, NULL, error, sizeof(error)));
+    assert(vfh_library_find(&locked, VFH_CONTENT_VIDEO, 1, "Locked/Inside.mp4"));
+
+    assert(chmod(locked_sub, 0000) == 0);
+    assert(vfh_library_scan_cancellable(&locked, &locked_sources, NULL, NULL, NULL,
+                                        error, sizeof(error)) == VFH_LIBRARY_SCAN_PARTIAL);
+    assert(error[0]);
+    /* Both readable cards survive, and the cached record under the unreadable
+       folder is retained but marked unavailable rather than deleted. */
+    const vfh_library_item *good = vfh_library_find(&locked, VFH_CONTENT_VIDEO, 0, "Good.mp4");
+    const vfh_library_item *also = vfh_library_find(&locked, VFH_CONTENT_VIDEO, 1, "AlsoGood.mp4");
+    const vfh_library_item *inside = vfh_library_find(&locked, VFH_CONTENT_VIDEO, 1,
+                                                      "Locked/Inside.mp4");
+    assert(good && good->available);
+    assert(also && also->available);
+    assert(inside && !inside->available);
+    assert(chmod(locked_sub, 0700) == 0);
+    /* Once readable again a complete scan reports no warning and restores it. */
+    assert(vfh_library_scan_cancellable(&locked, &locked_sources, NULL, NULL, NULL,
+                                        error, sizeof(error)) == VFH_LIBRARY_SCAN_COMPLETE);
+    assert(!error[0]);
+    inside = vfh_library_find(&locked, VFH_CONTENT_VIDEO, 1, "Locked/Inside.mp4");
+    assert(inside && inside->available);
+
+    vfh_library_destroy(&locked);
+    setenv("USERDATA_PATH", userdata, 1);
+
     /* A regular file is neither an empty Videos directory nor an absent card:
        once it is declared available the scan must report the broken root. */
     char invalid_root[1024];

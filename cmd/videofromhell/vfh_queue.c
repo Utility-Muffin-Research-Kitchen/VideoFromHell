@@ -113,16 +113,6 @@ bool vfh_queue_remove(vfh_queue *queue, size_t index) {
     return true;
 }
 
-bool vfh_queue_move(vfh_queue *queue, size_t index, int delta) {
-    if (!queue || index >= queue->count) return false;
-    long destination = (long)index + delta;
-    if (destination < 0 || destination >= (long)queue->count) return false;
-    vfh_queue_item item = queue->items[index];
-    queue->items[index] = queue->items[destination];
-    queue->items[destination] = item;
-    return true;
-}
-
 void vfh_queue_clear(vfh_queue *queue) {
     if (queue) queue->count = 0;
 }
