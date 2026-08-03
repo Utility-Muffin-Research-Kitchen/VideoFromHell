@@ -44,4 +44,9 @@ void vfh_resume_mark_watched(const char *path, double duration);
 void vfh_resume_mark_identity_watched(const vfh_resume_identity *identity,
                                       const char *absolute_path, double duration);
 
+/* Explicitly remove a continuation without marking it watched. */
+bool vfh_resume_remove(const char *path);
+bool vfh_resume_remove_identity(const vfh_resume_identity *identity,
+                                const char *absolute_path);
+
 #endif /* VFH_RESUME_H */

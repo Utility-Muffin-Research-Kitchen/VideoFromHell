@@ -45,12 +45,12 @@ The eventual user-facing route will be **Menu → Actions → Pak Rat**. A relea
 | Up / Down | move selection | move pinned OSD focus |
 | Left / Right | jump by letter | seek −/+ 10 seconds, or move/scrub pinned OSD focus |
 | A | open folder / play video | play / pause, or activate the pinned OSD control |
-| B | up one folder / quit source chooser | close submenu, close pinned OSD, or return to browser (position saved) |
-| X | add selected video to queue | play / pause |
-| Y | add selected video to play next | open/pin or hide the on-screen display |
+| B | up one folder | close submenu, close pinned OSD, or return to browser (position saved) |
+| X | open item actions (play, queue, info, history) | play / pause |
+| Y | — | open/pin or hide the on-screen display |
 | L1 / R1 | switch top-level views | previous / next (queue-aware when the current video is queued) |
 | L2 / R2 | — | hold to seek −/+ |
-| SELECT | — | toggle external subtitles |
+| SELECT | rescan library | toggle external subtitles |
 | Stick click | — | cycle Fit / Fill / Stretch |
 | MENU | quit | quit |
 
@@ -60,7 +60,7 @@ Transport actions reveal the title, elapsed/total time, scrub bar, active output
 
 Put videos under `Videos/` at the root of either SD card. On current Leaf builds the ordered `$VIDEO_PATHS` list identifies both roots and VFH merges them into one library. Equal folders coalesce; duplicate filenames retain an SD label. A missing card stays visible only where necessary—for example, its Continue Watching and queue entries are marked unavailable instead of being silently removed. Leaf's primary-card `$RECORDINGS_PATH` is also exposed as the `Recorded Gameplay` virtual folder; finalized MP4s are preferred over source MKVs and in-progress/scratch artifacts are hidden until a manual rescan.
 
-For an older launcher payload or a direct pak launch, the player falls back from `$VIDEO_PATHS` to `$VIDEO_PATH`, then `$SDCARD_PATH/Videos`, then `./Videos`. `RECORDINGS_PATH` similarly falls back to `$SDCARD_PATH/Recordings`, then `./Recordings`. It opens cleanly with an empty browser if none of those paths exists. Posters prefer an exact-stem local `.jpg`, `.jpeg`, or `.png` sidecar, then a `poster.*` image in a single-video folder, then embedded artwork, and finally a generated frame near 10% of the film (with a dark-frame fallback near 25%). Generated thumbnails and finite failure markers are stored under `$USERDATA_PATH/VideoFromHell/thumbs-v2/`. Queue, resume, watched, duration, and last-played state share the atomic `$USERDATA_PATH/VideoFromHell/playback-v2.json` store; a prior `resume.json` is imported on first use.
+For an older launcher payload or a direct pak launch, the player falls back from `$VIDEO_PATHS` to `$VIDEO_PATH`, then `$SDCARD_PATH/Videos`, then `./Videos`. `RECORDINGS_PATH` similarly falls back to `$SDCARD_PATH/Recordings`, then `./Recordings`. It opens cleanly with an empty browser if none of those paths exists. Posters prefer an exact-stem local `.jpg`, `.jpeg`, or `.png` sidecar, then a `poster.*` image in a single-video folder, then `folder.*` for folder presentation, embedded artwork, and finally a generated frame near 10% of the film (with a dark-frame fallback near 25%). Generated thumbnails and finite failure markers are stored under `$USERDATA_PATH/VideoFromHell/thumbs-v2/`. Queue, resume, watched, duration, and last-played state share the atomic `$USERDATA_PATH/VideoFromHell/playback-v2.json` store; a prior `resume.json` is imported on first use.
 
 ## Subtitles
 

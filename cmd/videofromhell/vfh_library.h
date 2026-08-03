@@ -34,6 +34,11 @@ typedef struct {
     uint64_t size;
     int64_t mtime;
     int64_t first_seen;
+    /* Recorder filename timestamp, encoded as YYYYMMDDhhmmss (or zero when
+     * the capture name has no recognizable timestamp).  Keeping it as a
+     * local wall-clock value avoids inventing a timezone for RetroArch's
+     * filename convention while remaining naturally sortable. */
+    int64_t capture_timestamp;
     double duration;
     int year;
     int recording_part;               /* 0 for ordinary files, otherwise -partN */

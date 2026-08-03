@@ -108,6 +108,12 @@ int main(void) {
     assert(vfh_resume_snapshot_get(&snapshot, film) == 650.0);
     vfh_resume_snapshot_destroy(&snapshot);
 
+    /* Continue Watching has an explicit removal path, distinct from watched. */
+    assert(vfh_resume_remove_identity(&identity, identity_path));
+    assert(vfh_resume_get_identity(&identity, identity_path) == 0.0);
+    assert(vfh_resume_remove(film));
+    assert(vfh_resume_get(film) == 0.0);
+
     /* A corrupt store must read as "no resume point", never crash or wedge. */
     FILE *fp = fopen(playback_path, "wb");
     assert(fp);

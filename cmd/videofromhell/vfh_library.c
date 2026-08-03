@@ -73,6 +73,30 @@ static bool vfh_library_file_is_write_locked(const char *path) {
     return locked;
 }
 
+static bool vfh_library_release_token(const char *token) {
+    static const char *const known[] = {
+        "480p", "576p", "720p", "1080p", "1440p", "2160p", "4k", "8k",
+        "x264", "x265", "h264", "h265", "hevc", "avc",
+        "bluray", "bdrip", "webrip", "web-dl", "webdl", "hdtv", "dvdrip",
+    };
+    if (!token || !token[0]) return false;
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strcasecmp(token, known[i]) == 0) return true;
+    return false;
+}
+
+/* Release groups commonly follow a useful codec token with a dash.  Only the
+ * known prefix is stripped, so meaningful hyphenated titles stay intact. */
+static bool vfh_library_release_suffix(char *token) {
+    if (vfh_library_release_token(token)) return true;
+    char *dash = token ? strchr(token, '-') : NULL;
+    if (!dash || dash == token || !dash[1]) return false;
+    *dash = '\0';
+    bool known = vfh_library_release_token(token);
+    *dash = '-';
+    return known;
+}
+
 static void vfh_library_clean_title(const char *filename, char *out, size_t out_size) {
     if (!out || out_size == 0) return;
     out[0] = '\0';
@@ -95,14 +119,134 @@ static void vfh_library_clean_title(const char *filename, char *out, size_t out_
     }
     while (used > 0 && isspace((unsigned char)out[used - 1])) used--;
     out[used] = '\0';
+    while (out[0]) {
+        char *token = out + strlen(out);
+        while (token > out && !isspace((unsigned char)token[-1])) token--;
+        if (!vfh_library_release_suffix(token)) break;
+        if (token == out) {
+            out[0] = '\0';
+            break;
+        }
+        do { token--; } while (token > out && isspace((unsigned char)*token));
+        token[1] = '\0';
+    }
     if (!out[0]) snprintf(out, out_size, "%s", filename);
+}
+
+static bool vfh_library_digits(const char *text, size_t count) {
+    if (!text) return false;
+    for (size_t i = 0; i < count; i++)
+        if (!isdigit((unsigned char)text[i])) return false;
+    return true;
+}
+
+static int vfh_library_decimal(const char *text, size_t count) {
+    int value = 0;
+    for (size_t i = 0; i < count; i++) value = value * 10 + text[i] - '0';
+    return value;
+}
+
+static bool vfh_library_capture_date_valid(int year, int month, int day,
+                                           int hour, int minute, int second) {
+    return year >= 2000 && year <= 3000 && month >= 1 && month <= 12 &&
+           day >= 1 && day <= 31 && hour >= 0 && hour <= 23 &&
+           minute >= 0 && minute <= 59 && second >= 0 && second <= 59;
+}
+
+/* RetroArch filenames vary by frontend/version, so accept both familiar
+ * ISO-style (`Game-2026-08-03_14-23-12`) and compact
+ * (`Game_20260803-142312`) timestamp segments. */
+static const char *vfh_library_capture_timestamp(const char *text, int64_t *out) {
+    if (out) *out = 0;
+    if (!text) return NULL;
+    for (const char *at = text; at[0]; at++) {
+        int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+        const char *after_date = NULL;
+        size_t remaining = strlen(at);
+        if (remaining >= 10 && vfh_library_digits(at, 4) &&
+            (at[4] == '-' || at[4] == '_' || at[4] == '.') &&
+            vfh_library_digits(at + 5, 2) &&
+            (at[7] == '-' || at[7] == '_' || at[7] == '.') &&
+            vfh_library_digits(at + 8, 2)) {
+            year = vfh_library_decimal(at, 4);
+            month = vfh_library_decimal(at + 5, 2);
+            day = vfh_library_decimal(at + 8, 2);
+            after_date = at + 10;
+        } else if (remaining >= 8 && vfh_library_digits(at, 8)) {
+            year = vfh_library_decimal(at, 4);
+            month = vfh_library_decimal(at + 4, 2);
+            day = vfh_library_decimal(at + 6, 2);
+            after_date = at + 8;
+        } else {
+            continue;
+        }
+        const char *time = after_date;
+        if (*time == 'T' || *time == 't' || *time == '-' || *time == '_' || *time == ' ')
+            time++;
+        size_t time_length = strlen(time);
+        if (time_length >= 2 && vfh_library_digits(time, 2)) {
+            hour = vfh_library_decimal(time, 2);
+            if (time_length >= 5 &&
+                (time[2] == '-' || time[2] == '_' || time[2] == ':' || time[2] == '.') &&
+                vfh_library_digits(time + 3, 2)) {
+                minute = vfh_library_decimal(time + 3, 2);
+                if (time_length >= 8 &&
+                    (time[5] == '-' || time[5] == '_' || time[5] == ':' || time[5] == '.') &&
+                    vfh_library_digits(time + 6, 2))
+                    second = vfh_library_decimal(time + 6, 2);
+            } else if (time_length >= 6 && vfh_library_digits(time + 2, 4)) {
+                minute = vfh_library_decimal(time + 2, 2);
+                second = vfh_library_decimal(time + 4, 2);
+            } else {
+                hour = minute = second = 0;
+            }
+        }
+        if (!vfh_library_capture_date_valid(year, month, day, hour, minute, second)) continue;
+        if (out) *out = (int64_t)year * 10000000000LL + (int64_t)month * 100000000LL +
+                        (int64_t)day * 1000000LL + (int64_t)hour * 10000LL +
+                        (int64_t)minute * 100LL + second;
+        return at;
+    }
+    return NULL;
+}
+
+static void vfh_library_clean_recording_title(const char *filename, char *out,
+                                              size_t out_size, int64_t *capture_timestamp) {
+    if (capture_timestamp) *capture_timestamp = 0;
+    char stem[VFH_LIBRARY_TITLE_MAX];
+    snprintf(stem, sizeof(stem), "%s", filename ? filename : "");
+    char *extension = strrchr(stem, '.');
+    if (extension) *extension = '\0';
+    char *part = NULL;
+    for (char *cursor = stem; *cursor; cursor++)
+        if (strncasecmp(cursor, "-part", 5) == 0) part = cursor;
+    if (part) {
+        char *end = NULL;
+        (void)strtol(part + 5, &end, 10);
+        if (end && !*end) *part = '\0';
+    }
+    int64_t timestamp = 0;
+    const char *timestamp_at = vfh_library_capture_timestamp(stem, &timestamp);
+    if (timestamp_at) {
+        char *trim = (char *)timestamp_at;
+        while (trim > stem && (trim[-1] == '-' || trim[-1] == '_' || trim[-1] == '.' ||
+                               isspace((unsigned char)trim[-1]))) trim--;
+        *trim = '\0';
+    }
+    vfh_library_clean_title(stem[0] ? stem : filename, out, out_size);
+    if (capture_timestamp) *capture_timestamp = timestamp;
 }
 
 static void vfh_library_set_clean_title(vfh_library_item *item) {
     if (!item) return;
     const char *name = strrchr(item->relative_path, '/');
-    vfh_library_clean_title(name ? name + 1 : item->relative_path,
-                            item->display_title, sizeof(item->display_title));
+    name = name ? name + 1 : item->relative_path;
+    if (item->content_kind == VFH_CONTENT_RECORDING)
+        vfh_library_clean_recording_title(name, item->display_title,
+                                          sizeof(item->display_title),
+                                          &item->capture_timestamp);
+    else
+        vfh_library_clean_title(name, item->display_title, sizeof(item->display_title));
 }
 
 static void vfh_library_clear_probe_metadata(vfh_library_item *item) {
@@ -473,10 +617,11 @@ static void vfh_library_scan_directory(vfh_library_scan_context *context,
                 vfh_library_scan_directory(context, path, rel, depth + 1);
             continue;
         }
-        if (!S_ISREG(st.st_mode) || !vfh_library_supported_file(entry->d_name)) continue;
+        if (!S_ISREG(st.st_mode)) continue;
         if (context->content_kind == VFH_CONTENT_RECORDING &&
             (st.st_size <= 0 || vfh_library_recording_scratch(entry->d_name) ||
              vfh_library_file_is_write_locked(path))) continue;
+        if (!vfh_library_supported_file(entry->d_name)) continue;
         if (!vfh_library_upsert(context->library, context->content_kind,
                                 context->source_index, rel, &st, context->generation)) {
             context->failed = true;
@@ -675,6 +820,7 @@ bool vfh_library_load(vfh_library *library) {
         cJSON *size = cJSON_GetObjectItemCaseSensitive(record, "size");
         cJSON *mtime = cJSON_GetObjectItemCaseSensitive(record, "mtime");
         cJSON *first_seen = cJSON_GetObjectItemCaseSensitive(record, "first_seen");
+        cJSON *capture_timestamp = cJSON_GetObjectItemCaseSensitive(record, "capture_timestamp");
         cJSON *duration = cJSON_GetObjectItemCaseSensitive(record, "duration");
         cJSON *part = cJSON_GetObjectItemCaseSensitive(record, "part");
         cJSON *available = cJSON_GetObjectItemCaseSensitive(record, "available");
@@ -686,6 +832,7 @@ bool vfh_library_load(vfh_library *library) {
         if (!cJSON_IsObject(record) || !cJSON_IsString(kind) || !kind->valuestring ||
             !cJSON_IsNumber(source) || !cJSON_IsNumber(size) || !cJSON_IsNumber(mtime) ||
             !cJSON_IsNumber(first_seen) || !cJSON_IsNumber(duration) || !cJSON_IsNumber(part) ||
+            (capture_timestamp && !cJSON_IsNumber(capture_timestamp)) ||
             (available && !cJSON_IsBool(available)) ||
             (year && (!cJSON_IsNumber(year) || year->valueint < 0 || year->valueint > 3000)) ||
             (metadata_ready && !cJSON_IsBool(metadata_ready)) ||
@@ -722,6 +869,7 @@ bool vfh_library_load(vfh_library *library) {
         item->size = (uint64_t)size->valuedouble;
         item->mtime = (int64_t)mtime->valuedouble;
         item->first_seen = (int64_t)first_seen->valuedouble;
+        item->capture_timestamp = capture_timestamp ? (int64_t)capture_timestamp->valuedouble : 0;
         item->duration = duration->valuedouble;
         item->year = year ? year->valueint : 0;
         item->recording_part = part->valueint;
@@ -762,6 +910,7 @@ bool vfh_library_save(const vfh_library *library) {
             !cJSON_AddNumberToObject(record, "size", (double)item->size) ||
             !cJSON_AddNumberToObject(record, "mtime", (double)item->mtime) ||
             !cJSON_AddNumberToObject(record, "first_seen", (double)item->first_seen) ||
+            !cJSON_AddNumberToObject(record, "capture_timestamp", (double)item->capture_timestamp) ||
             !cJSON_AddNumberToObject(record, "duration", item->duration) ||
             !cJSON_AddNumberToObject(record, "year", item->year) ||
             !cJSON_AddNumberToObject(record, "part", item->recording_part) ||

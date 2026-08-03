@@ -81,10 +81,35 @@ static void vfh_test_submenu_back_stack(void) {
     assert(!vfh_osd_back(&osd));
 }
 
+static void vfh_test_reduced_capability_row(void) {
+    vfh_osd osd;
+    vfh_osd_init(&osd);
+    vfh_osd_toggle_pinned(&osd);
+    vfh_osd_set_capabilities(&osd, false, false, false);
+    vfh_osd_focus focuses[5] = { 0 };
+    assert(vfh_osd_row_two_focuses(&osd, focuses, 5) == 2);
+    assert(focuses[0] == VFH_OSD_FOCUS_ASPECT);
+    assert(focuses[1] == VFH_OSD_FOCUS_INFORMATION);
+
+    /* Row two reflows: down from central Play/Pause reaches the nearest
+       rendered choice instead of a hidden Queue/Subtitles/More tile. */
+    vfh_osd_move(&osd, 0, 1);
+    assert(osd.focus == VFH_OSD_FOCUS_INFORMATION);
+    vfh_osd_move(&osd, -1, 0);
+    assert(osd.focus == VFH_OSD_FOCUS_ASPECT);
+    vfh_osd_move(&osd, 0, -1);
+    assert(osd.focus == VFH_OSD_FOCUS_PREVIOUS);
+
+    osd.focus = VFH_OSD_FOCUS_QUEUE;
+    vfh_osd_set_capabilities(&osd, false, false, false);
+    assert(osd.focus == VFH_OSD_FOCUS_PLAY_PAUSE);
+}
+
 int main(void) {
     vfh_test_visibility_and_pinning();
     vfh_test_focus_map();
     vfh_test_submenu_back_stack();
+    vfh_test_reduced_capability_row();
     puts("vfh osd tests passed");
     return 0;
 }

@@ -1,28 +1,40 @@
 #include "vfh_osd.h"
 
+#include <stddef.h>
+
 static bool vfh_osd_deadline_reached(uint32_t now_ms, uint32_t deadline_ms) {
     /* SDL_GetTicks-style clocks wrap. Signed subtraction makes deadlines work
        on both sides of that wrap as long as intervals stay below 24 days. */
     return deadline_ms != 0 && (int32_t)(now_ms - deadline_ms) >= 0;
 }
 
-static int vfh_osd_row(vfh_osd_focus focus) {
+static int vfh_osd_row(const vfh_osd *osd, vfh_osd_focus focus) {
     if (focus >= VFH_OSD_FOCUS_PREVIOUS && focus <= VFH_OSD_FOCUS_NEXT) return 0;
-    if (focus >= VFH_OSD_FOCUS_QUEUE && focus <= VFH_OSD_FOCUS_INFORMATION) return 1;
+    vfh_osd_focus row_two[5];
+    int count = vfh_osd_row_two_focuses(osd, row_two, 5);
+    for (int i = 0; i < count; i++)
+        if (row_two[i] == focus) return 1;
     return -1;
 }
 
-static int vfh_osd_column(vfh_osd_focus focus) {
+static int vfh_osd_column(const vfh_osd *osd, vfh_osd_focus focus) {
     if (focus >= VFH_OSD_FOCUS_PREVIOUS && focus <= VFH_OSD_FOCUS_NEXT)
         return (int)focus - (int)VFH_OSD_FOCUS_PREVIOUS;
-    if (focus >= VFH_OSD_FOCUS_QUEUE && focus <= VFH_OSD_FOCUS_INFORMATION)
-        return (int)focus - (int)VFH_OSD_FOCUS_QUEUE;
+    vfh_osd_focus row_two[5];
+    int count = vfh_osd_row_two_focuses(osd, row_two, 5);
+    for (int i = 0; i < count; i++)
+        if (row_two[i] == focus) return i;
     return 2; /* progress returns to the central Play/Pause control */
 }
 
-static vfh_osd_focus vfh_osd_from_row_column(int row, int column) {
+static vfh_osd_focus vfh_osd_from_row_column(const vfh_osd *osd, int row, int column) {
     if (row == 0) return (vfh_osd_focus)((int)VFH_OSD_FOCUS_PREVIOUS + column);
-    return (vfh_osd_focus)((int)VFH_OSD_FOCUS_QUEUE + column);
+    vfh_osd_focus row_two[5];
+    int count = vfh_osd_row_two_focuses(osd, row_two, 5);
+    if (count <= 0) return VFH_OSD_FOCUS_PLAY_PAUSE;
+    if (column < 0) column = 0;
+    if (column >= count) column = count - 1;
+    return row_two[column];
 }
 
 void vfh_osd_init(vfh_osd *osd) {
@@ -31,6 +43,11 @@ void vfh_osd_init(vfh_osd *osd) {
     osd->focus = VFH_OSD_FOCUS_PLAY_PAUSE;
     osd->submenu = VFH_OSD_SUBMENU_NONE;
     osd->transient_until_ms = 0;
+    /* Conservative defaults retain the full graph until playback publishes
+     * its real capabilities. This keeps a newly pinned OSD usable. */
+    osd->queue_available = true;
+    osd->subtitles_available = true;
+    osd->more_available = true;
 }
 
 void vfh_osd_tick(vfh_osd *osd, uint32_t now_ms) {
@@ -69,17 +86,47 @@ void vfh_osd_toggle_pinned(vfh_osd *osd) {
     osd->transient_until_ms = 0;
 }
 
+int vfh_osd_row_two_focuses(const vfh_osd *osd, vfh_osd_focus *out, int out_count) {
+    const bool queue = !osd || osd->queue_available;
+    const bool subtitles = !osd || osd->subtitles_available;
+    const bool more = !osd || osd->more_available;
+    vfh_osd_focus all[5];
+    int count = 0;
+    if (queue) all[count++] = VFH_OSD_FOCUS_QUEUE;
+    if (subtitles) all[count++] = VFH_OSD_FOCUS_SUBTITLES;
+    all[count++] = VFH_OSD_FOCUS_ASPECT;
+    if (more) all[count++] = VFH_OSD_FOCUS_MORE;
+    all[count++] = VFH_OSD_FOCUS_INFORMATION;
+    if (out && out_count > 0) {
+        int copied = count < out_count ? count : out_count;
+        for (int i = 0; i < copied; i++) out[i] = all[i];
+    }
+    return count;
+}
+
+void vfh_osd_set_capabilities(vfh_osd *osd, bool queue_available,
+                              bool subtitles_available, bool more_available) {
+    if (!osd) return;
+    osd->queue_available = queue_available;
+    osd->subtitles_available = subtitles_available;
+    osd->more_available = more_available;
+    if (vfh_osd_row(osd, osd->focus) == 1) return;
+    if (osd->focus >= VFH_OSD_FOCUS_QUEUE && osd->focus <= VFH_OSD_FOCUS_INFORMATION)
+        osd->focus = VFH_OSD_FOCUS_PLAY_PAUSE;
+}
+
 void vfh_osd_move(vfh_osd *osd, int horizontal, int vertical) {
     if (!osd || osd->state != VFH_OSD_PINNED) return;
 
     if (horizontal) {
-        int row = vfh_osd_row(osd->focus);
-        int column = vfh_osd_column(osd->focus);
+        int row = vfh_osd_row(osd, osd->focus);
+        int column = vfh_osd_column(osd, osd->focus);
         if (row < 0) return;  /* progress owns horizontal input for scrubbing */
         column += horizontal < 0 ? -1 : 1;
         if (column < 0) column = 0;
-        if (column > 4) column = 4;
-        osd->focus = vfh_osd_from_row_column(row, column);
+        int columns = row == 0 ? 5 : vfh_osd_row_two_focuses(osd, NULL, 0);
+        if (column >= columns) column = columns - 1;
+        osd->focus = vfh_osd_from_row_column(osd, row, column);
         return;
     }
 
@@ -89,11 +136,11 @@ void vfh_osd_move(vfh_osd *osd, int horizontal, int vertical) {
         return;
     }
 
-    int row = vfh_osd_row(osd->focus);
-    int column = vfh_osd_column(osd->focus);
+    int row = vfh_osd_row(osd, osd->focus);
+    int column = vfh_osd_column(osd, osd->focus);
     if (vertical < 0 && row == 0) osd->focus = VFH_OSD_FOCUS_PROGRESS;
-    else if (vertical > 0 && row == 0) osd->focus = vfh_osd_from_row_column(1, column);
-    else if (vertical < 0 && row == 1) osd->focus = vfh_osd_from_row_column(0, column);
+    else if (vertical > 0 && row == 0) osd->focus = vfh_osd_from_row_column(osd, 1, column);
+    else if (vertical < 0 && row == 1) osd->focus = vfh_osd_from_row_column(osd, 0, column);
 }
 
 bool vfh_osd_open_submenu(vfh_osd *osd, vfh_osd_submenu submenu) {

@@ -61,11 +61,18 @@ int main(void) {
     snprintf(path, sizeof(path), "%s/One.nfo", nested);
     make_file(path, "<movie><title>One: Local Title</title><year>2025</year></movie>");
     snprintf(path, sizeof(path), "%s/Two.mkv", videos2); make_file(path, "two");
+    snprintf(path, sizeof(path), "%s/Movie.2019.1080p.x264-GROUP.mkv", videos1);
+    make_file(path, "movie");
+    snprintf(path, sizeof(path), "%s/Studio.1080.mkv", videos1); make_file(path, "studio");
+    snprintf(path, sizeof(path), "%s/Spider-Man.2021.mkv", videos1); make_file(path, "spider");
     snprintf(path, sizeof(path), "%s/Game.mkv", recordings); make_file(path, "mkv");
     snprintf(path, sizeof(path), "%s/Game.mp4", recordings); make_file(path, "mp4");
-    snprintf(path, sizeof(path), "%s/Split.mkv", recordings); make_file(path, "source");
-    snprintf(path, sizeof(path), "%s/Split-part10.mp4", recordings); make_file(path, "ten");
-    snprintf(path, sizeof(path), "%s/Split-part2.mp4", recordings); make_file(path, "two");
+    snprintf(path, sizeof(path), "%s/Sonic-2026-08-03_14-23-12.mkv", recordings);
+    make_file(path, "source");
+    snprintf(path, sizeof(path), "%s/Sonic-2026-08-03_14-23-12-part10.mp4", recordings);
+    make_file(path, "ten");
+    snprintf(path, sizeof(path), "%s/Sonic-2026-08-03_14-23-12-part2.mp4", recordings);
+    make_file(path, "two");
     snprintf(path, sizeof(path), "%s/unfinished.mkv", recordings); make_file(path, "");
     snprintf(path, sizeof(path), "%s/converter.mp4.part", recordings); make_file(path, "scratch");
     snprintf(path, sizeof(path), "%s/active.mkv", recordings); make_file(path, "open");
@@ -79,20 +86,32 @@ int main(void) {
     vfh_library library;
     vfh_library_init(&library);
     assert(vfh_library_scan(&library, &sources, recordings, error, sizeof(error)));
-    assert(library.count == 5);
+    assert(library.count == 8);
     assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 0, "Movies/One.mp4"));
     assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 1, "Two.mkv"));
     assert(vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "Game.mp4"));
     assert(!vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "Game.mkv"));
+    assert(!vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "converter.mp4.part"));
     assert(!vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "active.mkv"));
+    const vfh_library_item *movie = vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                                                      "Movie.2019.1080p.x264-GROUP.mkv");
+    const vfh_library_item *studio = vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                                                       "Studio.1080.mkv");
+    const vfh_library_item *spider = vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                                                       "Spider-Man.2021.mkv");
+    assert(movie && !strcmp(movie->display_title, "Movie 2019"));
+    assert(studio && !strcmp(studio->display_title, "Studio 1080"));
+    assert(spider && !strcmp(spider->display_title, "Spider-Man 2021"));
     const vfh_library_item *part2 = vfh_library_find(&library, VFH_CONTENT_RECORDING, 0,
-                                                      "Split-part2.mp4");
+                                                      "Sonic-2026-08-03_14-23-12-part2.mp4");
     const vfh_library_item *part10 = vfh_library_find(&library, VFH_CONTENT_RECORDING, 0,
-                                                       "Split-part10.mp4");
+                                                       "Sonic-2026-08-03_14-23-12-part10.mp4");
     assert(part2 && part10 && part2->recording_part == 2 && part10->recording_part == 10);
+    assert(!strcmp(part2->display_title, "Sonic") &&
+           part2->capture_timestamp == INT64_C(20260803142312));
     assert(part2 < part10);
     assert(vfh_library_resolve_path(part2, &sources, recordings, path, sizeof(path)));
-    assert(strstr(path, "/Recordings/Split-part2.mp4") != NULL);
+    assert(strstr(path, "/Recordings/Sonic-2026-08-03_14-23-12-part2.mp4") != NULL);
     vfh_library_item *one = find_mutable(&library, VFH_CONTENT_VIDEO, 0, "Movies/One.mp4");
     assert(one);
     assert(!strcmp(one->display_title, "One: Local Title") && one->nfo_title);
@@ -114,6 +133,10 @@ int main(void) {
     assert(warm_one && warm_one->duration == 123.0 && warm_one->metadata_ready &&
            warm_one->has_embedded_art && warm_one->art_source == VFH_LIBRARY_ART_EMBEDDED &&
            !strcmp(warm_one->video_codec, "h264") && warm_one->available);
+    const vfh_library_item *warm_part2 = vfh_library_find(
+        &warm, VFH_CONTENT_RECORDING, 0, "Sonic-2026-08-03_14-23-12-part2.mp4");
+    assert(warm_part2 && warm_part2->capture_timestamp == INT64_C(20260803142312) &&
+           warm_part2->recording_part == 2);
     assert(vfh_library_scan(&warm, &sources, recordings, error, sizeof(error)));
     warm_one = vfh_library_find(&warm, VFH_CONTENT_VIDEO, 0, "Movies/One.mp4");
     assert(warm_one && warm_one->available && warm_one->duration == 123.0);

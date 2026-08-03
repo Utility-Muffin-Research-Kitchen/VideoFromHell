@@ -20,10 +20,11 @@ int main(void) {
     assert(mkdtemp(root));
     assert(setenv("USERDATA_PATH", root, 1) == 0);
 
-    char movie[1200], exact[1200], poster[1200], other[1200], cache[1200], changed_cache[1200], found[1200];
+    char movie[1200], exact[1200], poster[1200], folder[1200], other[1200], cache[1200], changed_cache[1200], found[1200];
     snprintf(movie, sizeof(movie), "%s/movie.mp4", root);
     snprintf(exact, sizeof(exact), "%s/movie.jpg", root);
     snprintf(poster, sizeof(poster), "%s/poster.png", root);
+    snprintf(folder, sizeof(folder), "%s/folder.jpg", root);
     snprintf(other, sizeof(other), "%s/other.mkv", root);
     touch_file(movie);
     touch_file(exact);
@@ -34,6 +35,12 @@ int main(void) {
     assert(unlink(exact) == 0);
     assert(vfh_art_find_sidecar(movie, found, sizeof(found)));
     assert(strcmp(found, poster) == 0);
+    assert(vfh_art_find_folder_art(root, found, sizeof(found)));
+    assert(strcmp(found, poster) == 0);
+    assert(unlink(poster) == 0);
+    touch_file(folder);
+    assert(vfh_art_find_folder_art(root, found, sizeof(found)));
+    assert(strcmp(found, folder) == 0);
     touch_file(other);
     assert(!vfh_art_find_sidecar(movie, found, sizeof(found)));
 
@@ -59,7 +66,7 @@ int main(void) {
     vfh_art_failure_path(cache, true, error, sizeof(error));
     vfh_art_clear_failures(cache);
     assert(unlink(movie) == 0);
-    assert(unlink(poster) == 0);
+    assert(unlink(folder) == 0);
     assert(unlink(other) == 0);
     char cache_dir[1200], app_dir[1200];
     snprintf(cache_dir, sizeof(cache_dir), "%s/VideoFromHell/thumbs-v2", root);

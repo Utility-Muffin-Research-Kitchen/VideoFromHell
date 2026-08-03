@@ -46,6 +46,9 @@ typedef struct {
     vfh_osd_focus focus;
     vfh_osd_submenu submenu;
     uint32_t transient_until_ms;
+    bool queue_available;
+    bool subtitles_available;
+    bool more_available;
 } vfh_osd;
 
 void vfh_osd_init(vfh_osd *osd);
@@ -57,6 +60,13 @@ void vfh_osd_flash(vfh_osd *osd, uint32_t now_ms);
 
 /* Y opens a focused OSD from hidden/transient and closes a pinned/submenu OSD. */
 void vfh_osd_toggle_pinned(vfh_osd *osd);
+
+/* The second row is capability-driven. Aspect and Video Information are
+ * always present; queue, subtitles, and chapters are only focusable when the
+ * current playback state can actually service them. */
+void vfh_osd_set_capabilities(vfh_osd *osd, bool queue_available,
+                              bool subtitles_available, bool more_available);
+int vfh_osd_row_two_focuses(const vfh_osd *osd, vfh_osd_focus *out, int out_count);
 
 /* Moves focus only while the main OSD surface is pinned. */
 void vfh_osd_move(vfh_osd *osd, int horizontal, int vertical);

@@ -350,3 +350,37 @@ void vfh_resume_mark_identity_watched(const vfh_resume_identity *identity,
     }
     cJSON_Delete(root);
 }
+
+bool vfh_resume_remove(const char *path) {
+    if (!path || !path[0]) return false;
+    cJSON *root = vfh_resume_load();
+    if (!root) return false;
+    cJSON *history = vfh_resume_history(root);
+    bool removed = history && cJSON_GetObjectItemCaseSensitive(history, path) != NULL;
+    if (removed) cJSON_DeleteItemFromObjectCaseSensitive(history, path);
+    bool saved = !removed || vfh_resume_store(root);
+    cJSON_Delete(root);
+    return saved;
+}
+
+bool vfh_resume_remove_identity(const vfh_resume_identity *identity,
+                                const char *absolute_path) {
+    char key[1024];
+    if (!vfh_resume_identity_key(identity, key, sizeof(key)))
+        return vfh_resume_remove(absolute_path);
+    cJSON *root = vfh_resume_load();
+    if (!root) return false;
+    cJSON *history = vfh_resume_history(root);
+    bool removed = history && cJSON_GetObjectItemCaseSensitive(history, key) != NULL;
+    if (removed) cJSON_DeleteItemFromObjectCaseSensitive(history, key);
+    /* Consume a legacy absolute record too, so a user removal cannot reappear
+     * when a mount path changes before the next durable identity migration. */
+    if (history && absolute_path && absolute_path[0] &&
+        cJSON_GetObjectItemCaseSensitive(history, absolute_path) != NULL) {
+        cJSON_DeleteItemFromObjectCaseSensitive(history, absolute_path);
+        removed = true;
+    }
+    bool saved = !removed || vfh_resume_store(root);
+    cJSON_Delete(root);
+    return saved;
+}
