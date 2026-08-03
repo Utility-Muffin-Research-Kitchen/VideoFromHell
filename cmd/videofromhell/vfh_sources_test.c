@@ -54,6 +54,12 @@ int main(void) {
     assert(sources.items[1].available == 0);
     assert(sources.items[1].state == VFH_SOURCE_NO_CARD);
     assert(strstr(vfh_source_state_message(&sources.items[1]), "not mounted") != NULL);
+    /* The configured root and stable source index survive a card becoming
+       available after launch; an explicit library rescan must see it. */
+    setenv("VFH_SOURCE_TEST_AVAILABLE", "1", 1);
+    vfh_sources_refresh(&sources);
+    assert(sources.items[1].available == 1);
+    assert(sources.items[1].state == VFH_SOURCE_OK);
     unsetenv("VFH_SOURCE_TEST_AVAILABLE");
 
     char recordings[1024];

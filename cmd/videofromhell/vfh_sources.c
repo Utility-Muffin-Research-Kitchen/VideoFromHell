@@ -129,6 +129,12 @@ static void vfh_source_classify(vfh_source *source) {
     source->available = source->state == VFH_SOURCE_OK;
 }
 
+void vfh_sources_refresh(vfh_sources *sources) {
+    if (!sources) return;
+    for (int i = 0; i < sources->count; i++)
+        vfh_source_classify(&sources->items[i]);
+}
+
 const char *vfh_source_state_message(const vfh_source *source) {
     if (!source) return NULL;
     switch (source->state) {

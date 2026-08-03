@@ -40,6 +40,10 @@ int vfh_sources_resolve(vfh_sources *out, char *error, size_t error_size);
 int vfh_sources_parse(vfh_sources *out, const char *video_paths,
                       char *error, size_t error_size);
 
+/* Re-evaluate mount and Videos-folder state without changing the configured
+   roots or their stable source indices. Call before every manual rescan. */
+void vfh_sources_refresh(vfh_sources *sources);
+
 /* Resolve the singular, primary-owned gameplay-capture root. This remains
    separate from VIDEO_PATHS because Jawaka's conversion pass is primary-only:
    recordings are not a second plural video source. The directory need not

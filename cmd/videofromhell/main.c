@@ -1,10 +1,9 @@
 /*
- * Video From Hell — Phase 3 library browser.
+ * Video From Hell — merged, source-aware video library and player.
  *
- * Scanning is deliberately source-local: a multi-card device starts at an SD
- * source chooser, and navigation never merges two cards into one directory.
- * Poster decoding and playback workers never touch the renderer. Uploading
- * decoded video frames stays in this main thread.
+ * Browser state is rendered only on the main thread. Catalog, artwork and
+ * playback workers own their private data; only completed work is published.
+ * Decoded video-frame uploads remain on the main thread.
  */
 #define CAT_IMPLEMENTATION
 #include "catastrophe.h"
@@ -14,6 +13,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,6 +71,8 @@ typedef struct {
     bool running;
     bool complete;
     bool succeeded;
+    bool cancelled;
+    atomic_bool cancel;
     vfh_sources sources;
     char recordings_path[VFH_SOURCE_PATH_MAX];
     char error[256];
@@ -110,6 +112,7 @@ typedef struct {
     vfh_folder_nav folder_nav[VFH_FOLDER_NAV_MAX];
     int folder_nav_count;
     vfh_rescan_worker rescan;
+    bool rescan_needs_resume;
     char recordings_path[VFH_SOURCE_PATH_MAX];
     char directory[VFH_SOURCE_PATH_MAX];
     char message[256];
@@ -226,14 +229,15 @@ static int vfh_entry_compare(const void *a, const void *b) {
     return strcasecmp(left->name, right->name);
 }
 
-static double vfh_resume_for_library_item(const vfh_library_item *item, const char *path) {
-    if (!item) return vfh_resume_get(path);
+static double vfh_resume_for_library_item(const vfh_resume_snapshot *snapshot,
+                                          const vfh_library_item *item, const char *path) {
+    if (!item) return vfh_resume_snapshot_get(snapshot, path);
     vfh_resume_identity identity = {
         .content_kind = item->content_kind,
         .source_index = item->source_index,
         .relative_path = item->relative_path,
     };
-    return vfh_resume_get_identity(&identity, path);
+    return vfh_resume_snapshot_get_identity(snapshot, &identity, path);
 }
 
 static void vfh_checkpoint_playing(vfh_browser *browser, double position, double duration) {
@@ -377,7 +381,9 @@ static void vfh_scan_directory(vfh_browser *browser) {
         browser->message[0] = '\0';
 }
 
-static void vfh_add_catalog_video(vfh_browser *browser, size_t catalog_index) {
+static void vfh_add_catalog_video(vfh_browser *browser,
+                                  const vfh_resume_snapshot *resume_snapshot,
+                                  size_t catalog_index) {
     if (!browser || catalog_index >= browser->catalog.count ||
         browser->entry_count >= VFH_ENTRY_MAX) return;
     const vfh_library_item *item = &browser->catalog.items[catalog_index];
@@ -390,7 +396,7 @@ static void vfh_add_catalog_video(vfh_browser *browser, size_t catalog_index) {
     entry->has_duration = item->duration > 0.0;
     entry->duration = item->duration;
     entry->first_seen = item->first_seen;
-    entry->resume_seconds = vfh_resume_for_library_item(item, path);
+    entry->resume_seconds = vfh_resume_for_library_item(resume_snapshot, item, path);
     entry->catalog_index = (int)catalog_index;
     entry->content_kind = item->content_kind;
 }
@@ -426,7 +432,8 @@ static void vfh_add_folder(vfh_browser *browser, const char *name,
     browser->entries[browser->entry_count - 1].recordings_folder = recordings;
 }
 
-static bool vfh_recordings_folder_visible(const vfh_browser *browser) {
+static bool vfh_recordings_folder_visible(const vfh_browser *browser,
+                                          const vfh_resume_snapshot *resume_snapshot) {
     struct stat st;
     if (browser && browser->recordings_path[0] &&
         stat(browser->recordings_path, &st) == 0 && S_ISDIR(st.st_mode)) return true;
@@ -435,7 +442,8 @@ static bool vfh_recordings_folder_visible(const vfh_browser *browser) {
         if (item->content_kind != VFH_CONTENT_RECORDING) continue;
         char path[VFH_SOURCE_PATH_MAX];
         if (vfh_library_resolve_path(item, &browser->sources, browser->recordings_path,
-                                     path, sizeof(path)) && vfh_resume_for_library_item(item, path) > 0.0)
+                                     path, sizeof(path)) &&
+            vfh_resume_for_library_item(resume_snapshot, item, path) > 0.0)
             return true;
     }
     return false;
@@ -497,29 +505,33 @@ static void vfh_store_current_list(vfh_browser *browser) {
     nav->list = browser->list;
 }
 
-static void vfh_build_continue_view(vfh_browser *browser) {
+static void vfh_build_continue_view(vfh_browser *browser,
+                                    const vfh_resume_snapshot *resume_snapshot) {
     for (size_t i = 0; i < browser->catalog.count; i++) {
         const vfh_library_item *item = &browser->catalog.items[i];
         char path[VFH_SOURCE_PATH_MAX];
         if (!vfh_library_resolve_path(item, &browser->sources, browser->recordings_path,
                                       path, sizeof(path)) ||
-            vfh_resume_for_library_item(item, path) <= 0.0)
+            vfh_resume_for_library_item(resume_snapshot, item, path) <= 0.0)
             continue;
-        vfh_add_catalog_video(browser, i);
+        vfh_add_catalog_video(browser, resume_snapshot, i);
     }
 }
 
-static void vfh_build_recent_view(vfh_browser *browser) {
+static void vfh_build_recent_view(vfh_browser *browser,
+                                  const vfh_resume_snapshot *resume_snapshot) {
     for (size_t i = 0; i < browser->catalog.count; i++)
-        if (browser->catalog.items[i].available) vfh_add_catalog_video(browser, i);
+        if (browser->catalog.items[i].available)
+            vfh_add_catalog_video(browser, resume_snapshot, i);
     qsort(browser->entries, (size_t)browser->entry_count, sizeof(browser->entries[0]),
           vfh_recent_compare);
 }
 
-static void vfh_build_folders_view(vfh_browser *browser) {
+static void vfh_build_folders_view(vfh_browser *browser,
+                                   const vfh_resume_snapshot *resume_snapshot) {
     if (!browser) return;
     if (!browser->folder_recordings && !browser->folder_relative[0] &&
-        vfh_recordings_folder_visible(browser))
+        vfh_recordings_folder_visible(browser, resume_snapshot))
         vfh_add_folder(browser, "Recorded Gameplay", "", true);
     for (size_t i = 0; i < browser->catalog.count; i++) {
         const vfh_library_item *item = &browser->catalog.items[i];
@@ -540,7 +552,7 @@ static void vfh_build_folders_view(vfh_browser *browser) {
             snprintf(name, sizeof(name), "%.*s", (int)(slash - rest), rest);
             vfh_add_folder(browser, name, child, browser->folder_recordings);
         } else {
-            vfh_add_catalog_video(browser, i);
+            vfh_add_catalog_video(browser, resume_snapshot, i);
         }
     }
     qsort(browser->entries, (size_t)browser->entry_count, sizeof(browser->entries[0]),
@@ -551,12 +563,16 @@ static void vfh_scan_catalog(vfh_browser *browser) {
     browser->entry_count = 0;
     browser->source_menu = false;
     vfh_clear_poster(browser);
+    vfh_resume_snapshot resume_snapshot;
+    vfh_resume_snapshot_init(&resume_snapshot);
+    (void)vfh_resume_snapshot_load(&resume_snapshot);
     switch (browser->tab) {
-        case VFH_TAB_CONTINUE: vfh_build_continue_view(browser); break;
-        case VFH_TAB_RECENT:   vfh_build_recent_view(browser); break;
-        case VFH_TAB_FOLDERS:  vfh_build_folders_view(browser); break;
+        case VFH_TAB_CONTINUE: vfh_build_continue_view(browser, &resume_snapshot); break;
+        case VFH_TAB_RECENT:   vfh_build_recent_view(browser, &resume_snapshot); break;
+        case VFH_TAB_FOLDERS:  vfh_build_folders_view(browser, &resume_snapshot); break;
         default: break;
     }
+    vfh_resume_snapshot_destroy(&resume_snapshot);
     vfh_restore_current_list(browser);
     if (browser->entry_count == VFH_ENTRY_MAX)
         vfh_set_message(browser, "Library is large; showing the first 768 items.");
@@ -578,9 +594,11 @@ static void vfh_scan_catalog(vfh_browser *browser) {
  * which keeps render state free of cross-thread mutation. */
 static void vfh_catalog_probe_missing_metadata(vfh_library *library,
                                                const vfh_sources *sources,
-                                               const char *recordings_path) {
+                                               const char *recordings_path,
+                                               const atomic_bool *cancel) {
     if (!library || !sources) return;
     for (size_t i = 0; i < library->count; i++) {
+        if (cancel && atomic_load(cancel)) return;
         vfh_library_item *item = &library->items[i];
         char path[VFH_SOURCE_PATH_MAX];
         if (!item->available ||
@@ -602,11 +620,17 @@ static void vfh_catalog_probe_missing_metadata(vfh_library *library,
                 item->metadata_ready = true;
             }
         }
+        if (cancel && atomic_load(cancel)) return;
         if (has_sidecar) item->art_source = VFH_LIBRARY_ART_SIDECAR;
         else if (item->metadata_ready)
             item->art_source = item->has_embedded_art ? VFH_LIBRARY_ART_EMBEDDED
                                                        : VFH_LIBRARY_ART_GENERATED;
     }
+}
+
+static bool vfh_rescan_cancelled(void *opaque) {
+    const vfh_rescan_worker *worker = opaque;
+    return worker && atomic_load(&worker->cancel);
 }
 
 static void *vfh_rescan_thread(void *opaque) {
@@ -615,15 +639,21 @@ static void *vfh_rescan_thread(void *opaque) {
     vfh_library_init(&worker->result);
     (void)vfh_library_load(&worker->result);
     char error[sizeof(worker->error)] = "";
-    bool succeeded = vfh_library_scan(&worker->result, &worker->sources,
-                                      worker->recordings_path, error, sizeof(error));
+    vfh_library_scan_result scan = vfh_library_scan_cancellable(
+        &worker->result, &worker->sources, worker->recordings_path,
+        vfh_rescan_cancelled, worker, error, sizeof(error));
+    bool cancelled = scan == VFH_LIBRARY_SCAN_CANCELLED || vfh_rescan_cancelled(worker);
+    bool succeeded = scan == VFH_LIBRARY_SCAN_COMPLETE && !cancelled;
     if (succeeded) {
         vfh_catalog_probe_missing_metadata(&worker->result, &worker->sources,
-                                           worker->recordings_path);
-        (void)vfh_library_save(&worker->result);
+                                           worker->recordings_path, &worker->cancel);
+        cancelled = vfh_rescan_cancelled(worker);
+        if (!cancelled) (void)vfh_library_save(&worker->result);
+        else succeeded = false;
     }
     pthread_mutex_lock(&worker->mutex);
     worker->succeeded = succeeded;
+    worker->cancelled = cancelled;
     snprintf(worker->error, sizeof(worker->error), "%s", error);
     worker->complete = true;
     pthread_mutex_unlock(&worker->mutex);
@@ -633,16 +663,21 @@ static void *vfh_rescan_thread(void *opaque) {
 static void vfh_rescan_start(vfh_browser *browser) {
     if (!browser || browser->rescan.running) return;
     vfh_rescan_worker *worker = &browser->rescan;
+    vfh_sources_refresh(&browser->sources);
     memset(&worker->sources, 0, sizeof(worker->sources));
     worker->sources = browser->sources;
     snprintf(worker->recordings_path, sizeof(worker->recordings_path), "%s",
              browser->recordings_path);
-    worker->complete = worker->succeeded = false;
+    worker->complete = worker->succeeded = worker->cancelled = false;
     worker->error[0] = '\0';
+    atomic_store(&worker->cancel, false);
     vfh_library_destroy(&worker->result);
     worker->running = pthread_create(&worker->thread, NULL, vfh_rescan_thread, worker) == 0;
     if (!worker->running) vfh_set_message(browser, "Unable to start a library rescan.");
-    else vfh_set_message(browser, "Rescanning library…");
+    else {
+        browser->rescan_needs_resume = false;
+        vfh_set_message(browser, "Rescanning library…");
+    }
 }
 
 static bool vfh_rescan_finish(vfh_browser *browser, bool wait) {
@@ -666,8 +701,22 @@ static bool vfh_rescan_finish(vfh_browser *browser, bool wait) {
         return true;
     }
     vfh_library_destroy(&worker->result);
+    if (worker->cancelled) return false;
     vfh_set_message(browser, worker->error[0] ? worker->error : "Library rescan failed.");
     return false;
+}
+
+/* Playback must not compete with the card scanner or FFmpeg metadata probes.
+ * Signalling the transactional worker makes the join prompt and discards only
+ * its unpublished result; return to browsing resumes the unfinished refresh. */
+static void vfh_rescan_cancel(vfh_browser *browser, bool resume_when_browsing) {
+    if (!browser || !browser->rescan.running) return;
+    vfh_rescan_worker *worker = &browser->rescan;
+    atomic_store(&worker->cancel, true);
+    if (pthread_join(worker->thread, NULL) != 0) return;
+    worker->running = false;
+    vfh_library_destroy(&worker->result);
+    if (resume_when_browsing) browser->rescan_needs_resume = true;
 }
 
 static void vfh_show_source_menu(vfh_browser *browser) {
@@ -1380,10 +1429,11 @@ static void vfh_start_playback(vfh_browser *browser, const vfh_entry *entry) {
           }, entry->path)
         : vfh_resume_get(entry->path);
     /* Catalog I/O stays out of playback so it cannot contend with MPP/audio.
-       A manual rescan remains responsive while browsing; pressing play is the
-       one point where we retire its worker before opening the decoder. */
-    (void)vfh_rescan_finish(browser, true);
-    entry = &requested;  /* taking a completed scan rebuilds browser->entries */
+       Cancellation is transactional, so this only waits for the worker to
+       reach its next directory/probe boundary rather than completing a whole
+       cold-card scan before the selected film can start. */
+    vfh_rescan_cancel(browser, true);
+    entry = &requested;
     /* Read before stop_playback, which checkpoints the *outgoing* film. */
     vfh_stop_playback(browser);
     browser->player = vfh_player_create();
@@ -1950,6 +2000,7 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < VFH_TAB_COUNT; i++)
         cat_list_state_init(&browser.tab_lists[i], 1);
     pthread_mutex_init(&browser.rescan.mutex, NULL);
+    atomic_init(&browser.rescan.cancel, false);
     char source_error[256];
     if (!vfh_sources_resolve(&browser.sources, source_error, sizeof(source_error))) {
         vfh_sources_single_fallback(&browser.sources);
@@ -1966,21 +2017,15 @@ int main(int argc, char *argv[]) {
         vfh_set_message(&browser, "Live audio-output updates are unavailable.");
     (void)vfh_queue_load(&browser.queue);
     (void)vfh_library_load(&browser.catalog);
-    char catalog_error[256] = "";
     browser.merged_library = true;
-    if (vfh_recordings_path_resolve(browser.recordings_path, sizeof(browser.recordings_path)) &&
-        vfh_library_scan(&browser.catalog, &browser.sources, browser.recordings_path,
-                         catalog_error, sizeof(catalog_error))) {
-        (void)vfh_library_save(&browser.catalog);
-    } else if (catalog_error[0]) {
-        vfh_set_message(&browser, catalog_error);
-    }
+    if (!vfh_recordings_path_resolve(browser.recordings_path, sizeof(browser.recordings_path)))
+        vfh_set_message(&browser, "Gameplay recordings path is unavailable.");
     browser.thumb_worker_ready = vfh_thumb_worker_init(&browser.thumbs);
     if (!browser.thumb_worker_ready)
         vfh_set_message(&browser, "Poster worker unavailable; browsing continues.");
     vfh_scan_catalog(&browser);
-    /* Publish cached/quickly enumerated rows first.  The worker refreshes the
-       same catalog plus duration cache misses without blocking navigation. */
+    /* Publish cached rows first. The worker performs the one filesystem scan
+       and metadata refresh without blocking first interaction. */
     vfh_rescan_start(&browser);
 
     bool running = true;
@@ -2138,7 +2183,11 @@ int main(int argc, char *argv[]) {
                     break;
             }
         }
-        if (!browser.player) (void)vfh_rescan_finish(&browser, false);
+        if (!browser.player) {
+            (void)vfh_rescan_finish(&browser, false);
+            if (browser.rescan_needs_resume && !browser.rescan.running)
+                vfh_rescan_start(&browser);
+        }
         if (browser.player) {
             Uint32 now = SDL_GetTicks();
             /* Hold-to-seek. Stepped on a timer rather than per frame so the
@@ -2175,7 +2224,7 @@ int main(int argc, char *argv[]) {
     }
 
     vfh_stop_playback(&browser);
-    (void)vfh_rescan_finish(&browser, true);
+    vfh_rescan_cancel(&browser, false);
     pthread_mutex_destroy(&browser.rescan.mutex);
     vfh_status_monitor_destroy(&browser.audio_status);
     vfh_clear_poster(&browser);

@@ -178,6 +178,52 @@ static cJSON *vfh_resume_load(void) {
     return root;
 }
 
+static double vfh_resume_record_seconds(const cJSON *record);
+
+void vfh_resume_snapshot_init(vfh_resume_snapshot *snapshot) {
+    if (snapshot) snapshot->root = NULL;
+}
+
+void vfh_resume_snapshot_destroy(vfh_resume_snapshot *snapshot) {
+    if (!snapshot) return;
+    cJSON_Delete((cJSON *)snapshot->root);
+    snapshot->root = NULL;
+}
+
+bool vfh_resume_snapshot_load(vfh_resume_snapshot *snapshot) {
+    if (!snapshot) return false;
+    vfh_resume_snapshot_destroy(snapshot);
+    snapshot->root = vfh_resume_load();
+    return snapshot->root != NULL;
+}
+
+static cJSON *vfh_resume_snapshot_history(const vfh_resume_snapshot *snapshot) {
+    cJSON *root = snapshot ? (cJSON *)snapshot->root : NULL;
+    return root ? cJSON_GetObjectItemCaseSensitive(root, "history") : NULL;
+}
+
+double vfh_resume_snapshot_get(const vfh_resume_snapshot *snapshot, const char *path) {
+    if (!path || !path[0]) return 0.0;
+    cJSON *history = vfh_resume_snapshot_history(snapshot);
+    cJSON *record = history ? cJSON_GetObjectItemCaseSensitive(history, path) : NULL;
+    return vfh_resume_record_seconds(record);
+}
+
+double vfh_resume_snapshot_get_identity(const vfh_resume_snapshot *snapshot,
+                                        const vfh_resume_identity *identity,
+                                        const char *absolute_path) {
+    char key[1024];
+    if (!vfh_resume_identity_key(identity, key, sizeof(key)))
+        return vfh_resume_snapshot_get(snapshot, absolute_path);
+    cJSON *history = vfh_resume_snapshot_history(snapshot);
+    cJSON *record = history ? cJSON_GetObjectItemCaseSensitive(history, key) : NULL;
+    /* Old path-keyed records remain visible for a warm migration but are not
+     * promoted here: a view rebuild is read-only and must not write storage. */
+    if (!record && history && absolute_path && absolute_path[0])
+        record = cJSON_GetObjectItemCaseSensitive(history, absolute_path);
+    return vfh_resume_record_seconds(record);
+}
+
 double vfh_resume_get(const char *path) {
     if (!path || !path[0]) return 0.0;
     cJSON *root = vfh_resume_load();

@@ -93,6 +93,21 @@ int main(void) {
     assert(vfh_resume_get(film) == 500.0);
     assert(vfh_resume_get(other) == 120.0);
 
+    /* Browser rendering keeps one immutable store snapshot. Repeated row
+       queries must not reopen the JSON document or promote legacy entries;
+       an explicit write becomes visible only to the next rebuild. */
+    vfh_resume_snapshot snapshot;
+    vfh_resume_snapshot_init(&snapshot);
+    assert(vfh_resume_snapshot_load(&snapshot));
+    assert(vfh_resume_snapshot_get(&snapshot, film) == 500.0);
+    assert(vfh_resume_snapshot_get_identity(&snapshot, &identity, identity_path) == 321.0);
+    vfh_resume_set(film, 650.0, 3600.0);
+    assert(vfh_resume_snapshot_get(&snapshot, film) == 500.0);
+    vfh_resume_snapshot_destroy(&snapshot);
+    assert(vfh_resume_snapshot_load(&snapshot));
+    assert(vfh_resume_snapshot_get(&snapshot, film) == 650.0);
+    vfh_resume_snapshot_destroy(&snapshot);
+
     /* A corrupt store must read as "no resume point", never crash or wedge. */
     FILE *fp = fopen(playback_path, "wb");
     assert(fp);

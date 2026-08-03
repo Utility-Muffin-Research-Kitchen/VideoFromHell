@@ -57,6 +57,17 @@ typedef struct {
     unsigned scan_generation;
 } vfh_library;
 
+/* The catalog worker polls this between directory entries and media records.
+ * A cancelled scan never publishes its partial result, so callers retain their
+ * previous usable catalog rather than briefly showing a half-enumerated card. */
+typedef bool (*vfh_library_cancelled_fn)(void *opaque);
+
+typedef enum {
+    VFH_LIBRARY_SCAN_COMPLETE = 0,
+    VFH_LIBRARY_SCAN_CANCELLED,
+    VFH_LIBRARY_SCAN_FAILED,
+} vfh_library_scan_result;
+
 void vfh_library_init(vfh_library *library);
 void vfh_library_destroy(vfh_library *library);
 
@@ -66,6 +77,12 @@ void vfh_library_destroy(vfh_library *library);
  * thread delegates exact size/mtime cache misses to its catalog worker. */
 bool vfh_library_scan(vfh_library *library, const vfh_sources *video_sources,
                       const char *recordings_path, char *error, size_t error_size);
+
+/* Cancellable transactional form used by the background catalog worker. */
+vfh_library_scan_result vfh_library_scan_cancellable(
+    vfh_library *library, const vfh_sources *video_sources,
+    const char *recordings_path, vfh_library_cancelled_fn cancelled,
+    void *cancel_opaque, char *error, size_t error_size);
 
 /* Versioned, bounded, FAT-safe cache. Corrupt or an unknown-major store is
  * discarded in memory and reported as false; callers can immediately rebuild. */

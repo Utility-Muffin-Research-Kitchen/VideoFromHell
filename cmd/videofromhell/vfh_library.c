@@ -237,6 +237,17 @@ void vfh_library_destroy(vfh_library *library) {
     memset(library, 0, sizeof(*library));
 }
 
+static bool vfh_library_copy(vfh_library *out, const vfh_library *source) {
+    if (!out || !source || source->count > VFH_LIBRARY_MAX_RECORDS) return false;
+    vfh_library_init(out);
+    if (source->count && !vfh_library_reserve(out, source->count)) return false;
+    if (source->count)
+        memcpy(out->items, source->items, source->count * sizeof(*out->items));
+    out->count = source->count;
+    out->scan_generation = source->scan_generation;
+    return true;
+}
+
 const vfh_library_item *vfh_library_find(const vfh_library *library,
                                          vfh_content_kind content_kind,
                                          int source_index,
@@ -420,20 +431,32 @@ typedef struct {
     int source_index;
     const char *root;
     unsigned generation;
+    vfh_library_cancelled_fn cancelled;
+    void *cancel_opaque;
+    bool cancelled_scan;
     bool failed;
 } vfh_library_scan_context;
+
+static bool vfh_library_scan_cancelled(vfh_library_scan_context *context) {
+    if (!context || !context->cancelled || !context->cancelled(context->cancel_opaque))
+        return false;
+    context->cancelled_scan = true;
+    return true;
+}
 
 static void vfh_library_scan_directory(vfh_library_scan_context *context,
                                        const char *directory, const char *relative,
                                        int depth) {
-    if (!context || context->failed || depth > VFH_LIBRARY_SCAN_DEPTH) return;
+    if (!context || context->failed || context->cancelled_scan ||
+        depth > VFH_LIBRARY_SCAN_DEPTH || vfh_library_scan_cancelled(context)) return;
     DIR *dir = opendir(directory);
     if (!dir) {
         context->failed = true;
         return;
     }
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && !context->failed) {
+    while ((entry = readdir(dir)) != NULL && !context->failed && !context->cancelled_scan) {
+        if (vfh_library_scan_cancelled(context)) break;
         if (entry->d_name[0] == '.') continue;
         char path[VFH_SOURCE_PATH_MAX];
         char rel[VFH_LIBRARY_RELATIVE_PATH_MAX];
@@ -467,10 +490,13 @@ static void vfh_library_scan_directory(vfh_library_scan_context *context,
     closedir(dir);
 }
 
-static bool vfh_library_scan_root(vfh_library *library, vfh_content_kind content_kind,
-                                  int source_index, const char *root, bool allow_missing,
-                                  char *error, size_t error_size) {
-    if (!root || !root[0]) return allow_missing;
+static vfh_library_scan_result vfh_library_scan_root(
+    vfh_library *library, vfh_content_kind content_kind, int source_index,
+    const char *root, bool allow_missing, vfh_library_cancelled_fn cancelled,
+    void *cancel_opaque, char *error, size_t error_size) {
+    if (cancelled && cancelled(cancel_opaque)) return VFH_LIBRARY_SCAN_CANCELLED;
+    if (!root || !root[0]) return allow_missing ? VFH_LIBRARY_SCAN_COMPLETE
+                                                : VFH_LIBRARY_SCAN_FAILED;
     struct stat root_stat;
     if (stat(root, &root_stat) != 0) {
         if (allow_missing && errno == ENOENT) {
@@ -478,14 +504,14 @@ static bool vfh_library_scan_root(vfh_library *library, vfh_content_kind content
              * caller already marked every item unavailable before scanning;
              * retain its durable identity so Continue Watching can explain
              * the missing source rather than silently forgetting it. */
-            return true;
+            return VFH_LIBRARY_SCAN_COMPLETE;
         }
         vfh_library_error(error, error_size, "Unable to read a video source.");
-        return false;
+        return VFH_LIBRARY_SCAN_FAILED;
     }
     if (!S_ISDIR(root_stat.st_mode)) {
         vfh_library_error(error, error_size, "A video source is not a folder.");
-        return false;
+        return VFH_LIBRARY_SCAN_FAILED;
     }
     unsigned generation = ++library->scan_generation;
     if (!generation) generation = ++library->scan_generation;
@@ -495,11 +521,14 @@ static bool vfh_library_scan_root(vfh_library *library, vfh_content_kind content
         .source_index = source_index,
         .root = root,
         .generation = generation,
+        .cancelled = cancelled,
+        .cancel_opaque = cancel_opaque,
     };
     vfh_library_scan_directory(&context, root, "", 0);
+    if (context.cancelled_scan) return VFH_LIBRARY_SCAN_CANCELLED;
     if (context.failed) {
         vfh_library_error(error, error_size, "Video library is too large or a folder could not be read.");
-        return false;
+        return VFH_LIBRARY_SCAN_FAILED;
     }
     for (size_t i = 0; i < library->count;) {
         vfh_library_item *item = &library->items[i];
@@ -512,27 +541,51 @@ static bool vfh_library_scan_root(vfh_library *library, vfh_content_kind content
     }
     if (content_kind == VFH_CONTENT_RECORDING)
         vfh_library_group_recordings(library, generation);
-    return true;
+    return VFH_LIBRARY_SCAN_COMPLETE;
+}
+
+vfh_library_scan_result vfh_library_scan_cancellable(
+    vfh_library *library, const vfh_sources *video_sources,
+    const char *recordings_path, vfh_library_cancelled_fn cancelled,
+    void *cancel_opaque, char *error, size_t error_size) {
+    if (!library || !video_sources) {
+        vfh_library_error(error, error_size, "Missing video-source configuration.");
+        return VFH_LIBRARY_SCAN_FAILED;
+    }
+    if (cancelled && cancelled(cancel_opaque)) return VFH_LIBRARY_SCAN_CANCELLED;
+    vfh_library working;
+    if (!vfh_library_copy(&working, library)) {
+        vfh_library_error(error, error_size, "Unable to allocate the video library.");
+        return VFH_LIBRARY_SCAN_FAILED;
+    }
+    for (size_t i = 0; i < working.count; i++) working.items[i].available = false;
+    vfh_library_scan_result result = VFH_LIBRARY_SCAN_COMPLETE;
+    for (int i = 0; i < video_sources->count; i++) {
+        const vfh_source *source = &video_sources->items[i];
+        if (!source->available) continue;  /* absent sources retain cached records */
+        result = vfh_library_scan_root(&working, VFH_CONTENT_VIDEO, i, source->root, false,
+                                       cancelled, cancel_opaque, error, error_size);
+        if (result != VFH_LIBRARY_SCAN_COMPLETE) break;
+    }
+    if (result == VFH_LIBRARY_SCAN_COMPLETE) {
+        result = vfh_library_scan_root(&working, VFH_CONTENT_RECORDING, 0, recordings_path,
+                                       true, cancelled, cancel_opaque, error, error_size);
+    }
+    if (result == VFH_LIBRARY_SCAN_COMPLETE) {
+        qsort(working.items, working.count, sizeof(*working.items), vfh_library_compare);
+        vfh_library_destroy(library);
+        *library = working;
+    } else {
+        vfh_library_destroy(&working);
+    }
+    return result;
 }
 
 bool vfh_library_scan(vfh_library *library, const vfh_sources *video_sources,
                       const char *recordings_path, char *error, size_t error_size) {
-    if (!library || !video_sources) {
-        vfh_library_error(error, error_size, "Missing video-source configuration.");
-        return false;
-    }
-    for (size_t i = 0; i < library->count; i++) library->items[i].available = false;
-    bool complete = true;
-    for (int i = 0; i < video_sources->count; i++) {
-        const vfh_source *source = &video_sources->items[i];
-        if (!source->available) continue;  /* absent sources retain cached records */
-        if (!vfh_library_scan_root(library, VFH_CONTENT_VIDEO, i, source->root, false,
-                                   error, error_size)) complete = false;
-    }
-    if (!vfh_library_scan_root(library, VFH_CONTENT_RECORDING, 0, recordings_path, true,
-                               error, error_size)) complete = false;
-    qsort(library->items, library->count, sizeof(*library->items), vfh_library_compare);
-    return complete;
+    return vfh_library_scan_cancellable(library, video_sources, recordings_path,
+                                        NULL, NULL, error, error_size) ==
+           VFH_LIBRARY_SCAN_COMPLETE;
 }
 
 static bool vfh_library_store_path(char *out, size_t out_size) {
@@ -624,6 +677,7 @@ bool vfh_library_load(vfh_library *library) {
         cJSON *first_seen = cJSON_GetObjectItemCaseSensitive(record, "first_seen");
         cJSON *duration = cJSON_GetObjectItemCaseSensitive(record, "duration");
         cJSON *part = cJSON_GetObjectItemCaseSensitive(record, "part");
+        cJSON *available = cJSON_GetObjectItemCaseSensitive(record, "available");
         cJSON *year = cJSON_GetObjectItemCaseSensitive(record, "year");
         cJSON *metadata_ready = cJSON_GetObjectItemCaseSensitive(record, "metadata_ready");
         cJSON *nfo_title = cJSON_GetObjectItemCaseSensitive(record, "nfo_title");
@@ -632,6 +686,7 @@ bool vfh_library_load(vfh_library *library) {
         if (!cJSON_IsObject(record) || !cJSON_IsString(kind) || !kind->valuestring ||
             !cJSON_IsNumber(source) || !cJSON_IsNumber(size) || !cJSON_IsNumber(mtime) ||
             !cJSON_IsNumber(first_seen) || !cJSON_IsNumber(duration) || !cJSON_IsNumber(part) ||
+            (available && !cJSON_IsBool(available)) ||
             (year && (!cJSON_IsNumber(year) || year->valueint < 0 || year->valueint > 3000)) ||
             (metadata_ready && !cJSON_IsBool(metadata_ready)) ||
             (nfo_title && !cJSON_IsBool(nfo_title)) ||
@@ -670,6 +725,9 @@ bool vfh_library_load(vfh_library *library) {
         item->duration = duration->valuedouble;
         item->year = year ? year->valueint : 0;
         item->recording_part = part->valueint;
+        /* Older v2 documents did not carry availability. Treat those cache
+         * rows conservatively until the background scan republishes them. */
+        item->available = cJSON_IsTrue(available);
         item->metadata_ready = cJSON_IsTrue(metadata_ready);
         item->nfo_title = cJSON_IsTrue(nfo_title);
         item->nfo_year = cJSON_IsTrue(nfo_year);
@@ -707,6 +765,7 @@ bool vfh_library_save(const vfh_library *library) {
             !cJSON_AddNumberToObject(record, "duration", item->duration) ||
             !cJSON_AddNumberToObject(record, "year", item->year) ||
             !cJSON_AddNumberToObject(record, "part", item->recording_part) ||
+            !cJSON_AddBoolToObject(record, "available", item->available) ||
             !cJSON_AddBoolToObject(record, "metadata_ready", item->metadata_ready) ||
             !cJSON_AddBoolToObject(record, "nfo_title", item->nfo_title) ||
             !cJSON_AddBoolToObject(record, "nfo_year", item->nfo_year) ||

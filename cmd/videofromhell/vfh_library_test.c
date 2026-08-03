@@ -33,6 +33,16 @@ static vfh_library_item *find_mutable(vfh_library *library, vfh_content_kind kin
     return NULL;
 }
 
+typedef struct {
+    int checks;
+    int cancel_on_check;
+} scan_cancel_fixture;
+
+static bool cancel_scan(void *opaque) {
+    scan_cancel_fixture *fixture = opaque;
+    return fixture && ++fixture->checks >= fixture->cancel_on_check;
+}
+
 int main(void) {
     char base[] = "/tmp/vfh-library-XXXXXX";
     assert(mkdtemp(base));
@@ -103,10 +113,22 @@ int main(void) {
                                                         "Movies/One.mp4");
     assert(warm_one && warm_one->duration == 123.0 && warm_one->metadata_ready &&
            warm_one->has_embedded_art && warm_one->art_source == VFH_LIBRARY_ART_EMBEDDED &&
-           !strcmp(warm_one->video_codec, "h264") && !warm_one->available);
+           !strcmp(warm_one->video_codec, "h264") && warm_one->available);
     assert(vfh_library_scan(&warm, &sources, recordings, error, sizeof(error)));
     warm_one = vfh_library_find(&warm, VFH_CONTENT_VIDEO, 0, "Movies/One.mp4");
     assert(warm_one && warm_one->available && warm_one->duration == 123.0);
+
+    /* Cancellation is transactional: the worker can discard an interrupted
+       scan without publishing a partial catalog over the warm cache. */
+    snprintf(path, sizeof(path), "%s/Cancelled.mp4", videos2); make_file(path, "later");
+    size_t count_before_cancel = warm.count;
+    scan_cancel_fixture cancel = { .cancel_on_check = 5 };
+    assert(vfh_library_scan_cancellable(&warm, &sources, recordings, cancel_scan, &cancel,
+                                        error, sizeof(error)) == VFH_LIBRARY_SCAN_CANCELLED);
+    assert(warm.count == count_before_cancel);
+    assert(!vfh_library_find(&warm, VFH_CONTENT_VIDEO, 1, "Cancelled.mp4"));
+    assert(vfh_library_scan(&warm, &sources, recordings, error, sizeof(error)));
+    assert(vfh_library_find(&warm, VFH_CONTENT_VIDEO, 1, "Cancelled.mp4"));
 
     snprintf(path, sizeof(path), "%s/One.nfo", nested);
     assert(unlink(path) == 0);

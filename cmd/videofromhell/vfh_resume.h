@@ -14,6 +14,21 @@ typedef struct {
     const char *relative_path;
 } vfh_resume_identity;
 
+/* An immutable in-memory view of playback-v2.json. Browser rendering loads one
+ * snapshot per rebuild so a large library never reopens and reparses its FAT
+ * store once for every row. `root` is private to vfh_resume.c. */
+typedef struct {
+    void *root;
+} vfh_resume_snapshot;
+
+void vfh_resume_snapshot_init(vfh_resume_snapshot *snapshot);
+bool vfh_resume_snapshot_load(vfh_resume_snapshot *snapshot);
+void vfh_resume_snapshot_destroy(vfh_resume_snapshot *snapshot);
+double vfh_resume_snapshot_get(const vfh_resume_snapshot *snapshot, const char *path);
+double vfh_resume_snapshot_get_identity(const vfh_resume_snapshot *snapshot,
+                                        const vfh_resume_identity *identity,
+                                        const char *absolute_path);
+
 /* Seconds into `path`, or 0 when there is no usable resume point. */
 double vfh_resume_get(const char *path);
 double vfh_resume_get_identity(const vfh_resume_identity *identity, const char *absolute_path);
