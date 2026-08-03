@@ -206,6 +206,26 @@ static const char *vfh_basename(const char *path) {
     return slash && slash[1] ? slash + 1 : (path ? path : "");
 }
 
+/* The filename without its extension, for telling apart rows whose resolved
+ * titles are identical. Truncated from the left so the tail - where release
+ * names put the resolution and codec - survives. */
+static void vfh_filename_stem(const char *path, char *out, size_t out_size) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    const char *name = vfh_basename(path);
+    if (!name[0]) return;
+    size_t length = strlen(name);
+    const char *dot = strrchr(name, '.');
+    if (dot && dot != name) length = (size_t)(dot - name);
+    if (length >= out_size) {
+        size_t kept = out_size - 2;
+        snprintf(out, out_size, "…%s", name + length - (kept > 0 ? kept - 1 : 0));
+        return;
+    }
+    memcpy(out, name, length);
+    out[length] = '\0';
+}
+
 static int vfh_entry_rank(vfh_entry_kind kind) {
     switch (kind) {
         case VFH_ENTRY_PARENT: return 0;
@@ -842,13 +862,19 @@ static void vfh_draw_entry(int index, int x, int y, int w, int h,
         } else {
             vfh_media_format_duration(entry->has_duration ? entry->duration : 0.0,
                                       meta, (int)sizeof(meta));
-            bool collision = false;
+            /* Two rows reading the same are two rows the user cannot choose
+               between. A shared card is answered with the SD badge; a shared
+               title inside one card has only the filename left to tell them
+               apart, which is exactly what the embedded-title precedence threw
+               away. Video Information still carries the full original name. */
+            bool collision = false, same_source_collision = false;
             for (int i = 0; i < browser->entry_count; i++) {
                 const vfh_entry *other = &browser->entries[i];
-                if (other != entry && other->kind == VFH_ENTRY_VIDEO &&
-                    other->source_index != entry->source_index &&
-                    strcasecmp(other->name, entry->name) == 0) {
-                    collision = true;
+                if (other == entry || other->kind != VFH_ENTRY_VIDEO ||
+                    strcasecmp(other->name, entry->name) != 0) continue;
+                collision = true;
+                if (other->source_index == entry->source_index) {
+                    same_source_collision = true;
                     break;
                 }
             }
@@ -867,6 +893,12 @@ static void vfh_draw_entry(int index, int x, int y, int w, int h,
                     snprintf(duration_text, sizeof(duration_text), "%s", meta);
                     snprintf(meta, sizeof(meta), "Gameplay · %.24s", duration_text);
                 }
+            } else if (same_source_collision) {
+                char stem[40];
+                vfh_filename_stem(entry->path, stem, sizeof(stem));
+                char duration_text[sizeof(meta)];
+                snprintf(duration_text, sizeof(duration_text), "%s", meta);
+                snprintf(meta, sizeof(meta), "%s · %.12s", stem, duration_text);
             } else if (collision) {
                 char duration_text[sizeof(meta)];
                 snprintf(duration_text, sizeof(duration_text), "%s", meta);
