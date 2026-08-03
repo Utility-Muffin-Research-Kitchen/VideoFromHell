@@ -974,6 +974,148 @@ static void vfh_draw_preview(vfh_browser *browser, SDL_Rect preview) {
                   text_y + TTF_FontHeight(cat_get_font(CAT_FONT_MEDIUM)) + cat_scale(6), theme->hint);
 }
 
+/* A footer hint that knows how to shrink.
+ *
+ * Catastrophe decides what fits while it renders, folding the overflow into a
+ * `+N` marker that VFH deliberately never wants to produce: a hint the user
+ * cannot read is an action they cannot find. So the row is fitted here first,
+ * and only labels that survive are handed over. */
+typedef struct {
+    cat_button button;
+    const char *button_text;    /* always explicit, so the estimate is exact */
+    const char *narrow_button_text;
+    const char *label;
+    const char *narrow_label;   /* NULL keeps the full label under pressure */
+    bool is_confirm;
+} vfh_footer_hint;
+
+/* Mirrors Catastrophe's footer geometry closely enough to predict its fit, and
+ * rounds against itself where it cannot: multi-character button text is
+ * measured in the small tier where Catastrophe renders it in the tiny one, so
+ * the estimate is never under the truth. Erring this way costs an occasional
+ * unnecessary abbreviation; erring the other way costs an unreachable action. */
+static int vfh_footer_group_width(const vfh_footer_hint *hints, int count, bool confirm,
+                                  bool narrow) {
+    TTF_Font *hint_font = cat_get_font(CAT_FONT_SMALL);
+    int margin = cat_device_scale(5);   /* CAT__BUTTON_MARGIN */
+    int badge = cat_device_scale(20);   /* CAT__BUTTON_SIZE */
+    int inner = 0, shown = 0;
+    for (int i = 0; i < count; i++) {
+        if (hints[i].is_confirm != confirm) continue;
+        const char *button = narrow && hints[i].narrow_button_text ? hints[i].narrow_button_text
+                                                                   : hints[i].button_text;
+        const char *label = narrow && hints[i].narrow_label ? hints[i].narrow_label
+                                                            : hints[i].label;
+        /* Catastrophe gives a single-codepoint badge a fixed circle and grows
+           only for longer overrides. */
+        int badge_w = button && button[0] && !button[1] ? badge
+                                                        : badge / 2 + cat_measure_text(hint_font, button);
+        if (shown++) inner += margin;
+        inner += badge_w + margin + cat_measure_text(hint_font, label) + margin;
+    }
+    return shown ? margin + inner + margin : 0;
+}
+
+static bool vfh_footer_fits(const vfh_footer_hint *hints, int count, bool narrow,
+                            int available) {
+    return vfh_footer_group_width(hints, count, false, narrow) +
+           vfh_footer_group_width(hints, count, true, narrow) <= available;
+}
+
+/* Fit the row by abbreviating first and, only if that is not enough, by
+ * dropping the lowest-priority hints outright.
+ *
+ * Dropping beats letting Catastrophe render its `+N` marker: the marker costs
+ * width of its own and, unless an app opts into the reveal chord, names
+ * actions the user has no way to see. A shorter row where every hint shown is
+ * real is more honest than a longer one ending in a number. Callers order
+ * hints by importance, so what goes is always the most expendable. */
+static void vfh_draw_footer_hints(const vfh_footer_hint *hints, int count) {
+    if (!hints || count <= 0) return;
+    /* Footer height is padding + pill, so the pill height recovers the padding
+       Catastrophe reserves at each screen edge without reaching into it. */
+    int padding = cat_get_footer_height() - cat_device_scale(30);
+    if (padding < 0) padding = 0;
+    int available = cat_get_screen_width() - padding * 2;
+
+    bool narrow = !vfh_footer_fits(hints, count, false, available);
+    vfh_footer_hint fitted[16];
+    if (count > (int)(sizeof(fitted) / sizeof(fitted[0])))
+        count = (int)(sizeof(fitted) / sizeof(fitted[0]));
+    memcpy(fitted, hints, (size_t)count * sizeof(*fitted));
+
+    while (count > 0 && !vfh_footer_fits(fitted, count, narrow, available)) {
+        int victim = -1;
+        for (int i = count - 1; i >= 0; i--) {
+            if (!fitted[i].is_confirm) { victim = i; break; }
+        }
+        if (victim < 0) break;  /* only the confirm action left; let it clip */
+        memmove(&fitted[victim], &fitted[victim + 1],
+                (size_t)(count - victim - 1) * sizeof(*fitted));
+        count--;
+    }
+
+    cat_footer_item items[16];
+    for (int i = 0; i < count; i++) {
+        items[i] = (cat_footer_item){
+            .button = fitted[i].button,
+            .label = narrow && fitted[i].narrow_label ? fitted[i].narrow_label : fitted[i].label,
+            .is_confirm = fitted[i].is_confirm,
+            .button_text = narrow && fitted[i].narrow_button_text ? fitted[i].narrow_button_text
+                                                                  : fitted[i].button_text,
+        };
+    }
+    cat_draw_footer(items, count);
+}
+
+/* Footer hints are context-sensitive and ordered by importance.
+ *
+ * Two rules keep every offered action reachable. Only hints that would do
+ * something right now are listed at all, so a fixed row never spends width on
+ * a no-op. And because Catastrophe keeps a *prefix* of the action group and
+ * folds the rest into its `+N` marker, the order here is the priority order:
+ * whatever cannot fit is the least useful hint, not the most useful one. */
+static void vfh_draw_browser_footer(vfh_browser *browser) {
+    const vfh_entry *selected =
+        browser->list.cursor >= 0 && browser->list.cursor < browser->entry_count
+            ? &browser->entries[browser->list.cursor] : NULL;
+    bool on_video = selected && selected->kind == VFH_ENTRY_VIDEO;
+    /* B is a no-op at the virtual root; MENU stays the explicit app exit. */
+    bool can_go_up = browser->tab == VFH_TAB_FOLDERS &&
+                     (browser->folder_recordings || browser->folder_relative[0]);
+    /* Letter jumping only earns its place once the list outgrows one screen. */
+    bool can_jump = browser->entry_count > browser->list.visible_rows;
+
+    vfh_footer_hint hints[8];
+    int count = 0;
+    if (on_video)
+        hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_X, .button_text = "X",
+                                            .label = "Actions" };
+    hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_L1, .button_text = "L/R",
+                                        .label = "Tabs" };
+    if (can_go_up)
+        hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_B, .button_text = "B",
+                                            .label = "Back" };
+    if (!browser->rescan.running)
+        hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_SELECT, .button_text = "SELECT",
+                                            .narrow_button_text = "SEL", .label = "Rescan",
+                                            .narrow_label = "Scan" };
+    hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_MENU, .button_text = "MENU",
+                                        .narrow_button_text = "M", .label = "Quit" };
+    /* Ranked last deliberately. Letter jumping is the one hint whose loss costs
+       nothing but discoverability - Up/Down still walks the list - and its
+       multi-character badge is the widest of the set, so surrendering it buys
+       back the most room for the actions that cannot be guessed. */
+    if (can_jump)
+        hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_LEFT, .button_text = "<->",
+                                            .label = "Jump" };
+    if (selected)
+        hints[count++] = (vfh_footer_hint){ .button = CAT_BTN_A, .button_text = "A",
+                                            .label = on_video ? "Play" : "Open",
+                                            .is_confirm = true };
+    vfh_draw_footer_hints(hints, count);
+}
+
 static void vfh_draw_browser(vfh_browser *browser) {
     cat_draw_background();
     cat_draw_screen_title("Video Library", NULL);
@@ -1016,16 +1158,7 @@ static void vfh_draw_browser(vfh_browser *browser) {
                                  content.x, content.y + content.h - TTF_FontHeight(cat_get_font(CAT_FONT_SMALL)),
                                  cat_get_theme()->hint, list_rect.w);
     if (has_preview) vfh_draw_preview(browser, preview);
-    cat_footer_item footer[] = {
-        { .button = CAT_BTN_MENU, .label = "Quit" },
-        { .button = CAT_BTN_B, .label = "Back" },
-        { .button = CAT_BTN_L1, .label = "Tabs", .button_text = "L/R" },
-        { .button = CAT_BTN_SELECT, .label = "Rescan" },
-        { .button = CAT_BTN_LEFT, .label = "Jump", .button_text = "<->" },
-        { .button = CAT_BTN_X, .label = "Actions" },
-        { .button = CAT_BTN_A, .label = "Open", .is_confirm = true },
-    };
-    cat_draw_footer(footer, 7);
+    vfh_draw_browser_footer(browser);
 }
 
 static void vfh_upload_due_video(vfh_browser *browser) {
