@@ -17,7 +17,7 @@ STUB_SOURCES := third_party/ffmpeg/stub/vfh_avformat_stub.c \
 	third_party/ffmpeg/stub/vfh_swscale_stub.c \
 	third_party/mpp/stub/vfh_mpp_stub.c
 
-.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 media-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test clean
+.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 media-smoke-mlp1 media-fixture-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test clean
 
 test: pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test
 
@@ -115,6 +115,10 @@ player-smoke-mlp1:
 # Test-only acceptance runner for VFH's metadata + poster decoder path.
 media-smoke-mlp1:
 	@./scripts/build-mlp1.sh vfh-media-smoke
+
+# Generates disposable device-side fixtures for the poster acceptance gates.
+media-fixture-smoke-mlp1: media-smoke-mlp1
+	@./scripts/media-fixture-smoke-mlp1.sh
 
 package-mlp1: mlp1
 	@rm -rf "$(MLP1_PACKAGE)"
