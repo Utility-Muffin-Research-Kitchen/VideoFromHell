@@ -47,7 +47,7 @@ int main(void) {
     char base[] = "/tmp/vfh-library-XXXXXX";
     assert(mkdtemp(base));
     char sd1[1024], sd2[1024], videos1[1024], videos2[1024], recordings[1024];
-    char nested[1024], userdata[1024], list[2050], path[1200], error[256];
+    char nested[1024], nested2[1024], depth[1024], userdata[1024], list[2050], path[1200], error[256];
     snprintf(sd1, sizeof(sd1), "%s/sd1", base);
     snprintf(sd2, sizeof(sd2), "%s/sd2", base);
     snprintf(videos1, sizeof(videos1), "%s/Videos", sd1);
@@ -57,14 +57,33 @@ int main(void) {
     make_dir(sd1); make_dir(sd2); make_dir(videos1); make_dir(videos2);
     make_dir(recordings); make_dir(userdata);
     snprintf(nested, sizeof(nested), "%s/Movies", videos1); make_dir(nested);
+    snprintf(nested2, sizeof(nested2), "%s/Movies", videos2); make_dir(nested2);
     snprintf(path, sizeof(path), "%s/One.mp4", nested); make_file(path, "one");
     snprintf(path, sizeof(path), "%s/One.nfo", nested);
     make_file(path, "<movie><title>One: Local Title</title><year>2025</year></movie>");
     snprintf(path, sizeof(path), "%s/Two.mkv", videos2); make_file(path, "two");
+    snprintf(path, sizeof(path), "%s/One.mp4", nested2); make_file(path, "other one");
     snprintf(path, sizeof(path), "%s/Movie.2019.1080p.x264-GROUP.mkv", videos1);
     make_file(path, "movie");
     snprintf(path, sizeof(path), "%s/Studio.1080.mkv", videos1); make_file(path, "studio");
     snprintf(path, sizeof(path), "%s/Spider-Man.2021.mkv", videos1); make_file(path, "spider");
+    snprintf(path, sizeof(path), "%s/Same.Title.mkv", videos1); make_file(path, "same one");
+    snprintf(path, sizeof(path), "%s/Same_Title.mkv", videos2); make_file(path, "same two");
+    snprintf(depth, sizeof(depth), "%s/Depth1", videos1); make_dir(depth);
+    for (int level = 2; level <= 6; level++) {
+        char next[1024];
+        snprintf(next, sizeof(next), "%s/Depth%d", depth, level);
+        make_dir(next);
+        snprintf(depth, sizeof(depth), "%s", next);
+    }
+    snprintf(path, sizeof(path), "%s/Allowed.mp4", depth); make_file(path, "depth six");
+    {
+        char next[1024];
+        snprintf(next, sizeof(next), "%s/Depth7", depth);
+        snprintf(depth, sizeof(depth), "%s", next);
+    }
+    make_dir(depth);
+    snprintf(path, sizeof(path), "%s/Hidden.mp4", depth); make_file(path, "depth seven");
     snprintf(path, sizeof(path), "%s/Game.mkv", recordings); make_file(path, "mkv");
     snprintf(path, sizeof(path), "%s/Game.mp4", recordings); make_file(path, "mp4");
     snprintf(path, sizeof(path), "%s/Sonic-2026-08-03_14-23-12.mkv", recordings);
@@ -86,9 +105,14 @@ int main(void) {
     vfh_library library;
     vfh_library_init(&library);
     assert(vfh_library_scan(&library, &sources, recordings, error, sizeof(error)));
-    assert(library.count == 8);
+    assert(library.count == 12);
     assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 0, "Movies/One.mp4"));
+    assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 1, "Movies/One.mp4"));
     assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 1, "Two.mkv"));
+    assert(vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                            "Depth1/Depth2/Depth3/Depth4/Depth5/Depth6/Allowed.mp4"));
+    assert(!vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                             "Depth1/Depth2/Depth3/Depth4/Depth5/Depth6/Depth7/Hidden.mp4"));
     assert(vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "Game.mp4"));
     assert(!vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "Game.mkv"));
     assert(!vfh_library_find(&library, VFH_CONTENT_RECORDING, 0, "converter.mp4.part"));
@@ -102,6 +126,13 @@ int main(void) {
     assert(movie && !strcmp(movie->display_title, "Movie 2019"));
     assert(studio && !strcmp(studio->display_title, "Studio 1080"));
     assert(spider && !strcmp(spider->display_title, "Spider-Man 2021"));
+    const vfh_library_item *same_one = vfh_library_find(&library, VFH_CONTENT_VIDEO, 0,
+                                                         "Same.Title.mkv");
+    const vfh_library_item *same_two = vfh_library_find(&library, VFH_CONTENT_VIDEO, 1,
+                                                         "Same_Title.mkv");
+    assert(same_one && same_two && same_one != same_two &&
+           !strcmp(same_one->display_title, "Same Title") &&
+           !strcmp(same_two->display_title, "Same Title"));
     const vfh_library_item *part2 = vfh_library_find(&library, VFH_CONTENT_RECORDING, 0,
                                                       "Sonic-2026-08-03_14-23-12-part2.mp4");
     const vfh_library_item *part10 = vfh_library_find(&library, VFH_CONTENT_RECORDING, 0,
@@ -195,6 +226,42 @@ int main(void) {
     assert(!vfh_library_load(&corrupt) && corrupt.count == 0);
     vfh_library_destroy(&corrupt);
     vfh_library_destroy(&library);
+
+    /* A regular file is neither an empty Videos directory nor an absent card:
+       once it is declared available the scan must report the broken root. */
+    char invalid_root[1024];
+    snprintf(invalid_root, sizeof(invalid_root), "%s/not-a-directory", base);
+    make_file(invalid_root, "not a directory");
+    vfh_sources invalid_sources;
+    assert(vfh_sources_parse(&invalid_sources, invalid_root, error, sizeof(error)));
+    invalid_sources.items[0].available = 1;
+    vfh_library invalid;
+    vfh_library_init(&invalid);
+    assert(!vfh_library_scan(&invalid, &invalid_sources, recordings, error, sizeof(error)));
+    vfh_library_destroy(&invalid);
+
+    /* The scanner must reject rather than silently truncate a malformed or
+       unexpectedly huge card. Keep this fixture separate from the functional
+       catalog so it cannot mask the normal path assertions above. */
+    char overflow_root[1024];
+    snprintf(overflow_root, sizeof(overflow_root), "%s/overflow", base);
+    make_dir(overflow_root);
+    for (int i = 0; i <= VFH_LIBRARY_MAX_RECORDS; i++) {
+        snprintf(path, sizeof(path), "%s/Video-%04d.mp4", overflow_root, i);
+        make_file(path, "x");
+    }
+    vfh_sources overflow_sources;
+    assert(vfh_sources_parse(&overflow_sources, overflow_root, error, sizeof(error)));
+    vfh_library overflow;
+    vfh_library_init(&overflow);
+    assert(!vfh_library_scan(&overflow, &overflow_sources, recordings, error, sizeof(error)));
+    assert(overflow.count == 0);
+    vfh_library_destroy(&overflow);
+    for (int i = 0; i <= VFH_LIBRARY_MAX_RECORDS; i++) {
+        snprintf(path, sizeof(path), "%s/Video-%04d.mp4", overflow_root, i);
+        assert(unlink(path) == 0);
+    }
+    assert(rmdir(overflow_root) == 0);
     puts("vfh_library_test: ok");
     return 0;
 }
