@@ -17,9 +17,9 @@ STUB_SOURCES := third_party/ffmpeg/stub/vfh_avformat_stub.c \
 	third_party/ffmpeg/stub/vfh_swscale_stub.c \
 	third_party/mpp/stub/vfh_mpp_stub.c
 
-.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test resume-test srt-test clean
+.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test clean
 
-test: pakrat-metadata-check stubs-test sources-test resume-test srt-test
+test: pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test
 
 pakrat-metadata-check:
 	@python3 scripts/pakrat-metadata-check.py
@@ -40,6 +40,28 @@ sources-test:
 		-o build/tests/vfh-sources-test
 	@build/tests/vfh-sources-test
 
+library-test:
+	@mkdir -p build/tests
+	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Icmd/videofromhell -I$(CJSON_DIR) \
+		cmd/videofromhell/vfh_sources.c cmd/videofromhell/vfh_library.c \
+		cmd/videofromhell/vfh_library_test.c $(CJSON_DIR)/cJSON.c \
+		-o build/tests/vfh-library-test
+	@build/tests/vfh-library-test
+
+art-test:
+	@mkdir -p build/tests
+	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -Icmd/videofromhell \
+		cmd/videofromhell/vfh_art.c cmd/videofromhell/vfh_art_test.c \
+		-o build/tests/vfh-art-test
+	@build/tests/vfh-art-test
+
+osd-test:
+	@mkdir -p build/tests
+	@$(CC) -std=c11 -Wall -Wextra -Werror -Icmd/videofromhell \
+		cmd/videofromhell/vfh_osd.c cmd/videofromhell/vfh_osd_test.c \
+		-o build/tests/vfh-osd-test
+	@build/tests/vfh-osd-test
+
 resume-test:
 	@mkdir -p build/tests
 	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Icmd/videofromhell -I$(CJSON_DIR) \
@@ -47,12 +69,30 @@ resume-test:
 		$(CJSON_DIR)/cJSON.c -o build/tests/vfh-resume-test
 	@build/tests/vfh-resume-test
 
+queue-test:
+	@mkdir -p build/tests
+	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -Icmd/videofromhell -I$(CJSON_DIR) \
+		cmd/videofromhell/vfh_queue.c cmd/videofromhell/vfh_resume.c \
+		cmd/videofromhell/vfh_queue_test.c \
+		$(CJSON_DIR)/cJSON.c -o build/tests/vfh-queue-test
+	@build/tests/vfh-queue-test
+
+status-test:
+	@mkdir -p build/tests
+	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror -Icmd/videofromhell -I$(CJSON_DIR) \
+		cmd/videofromhell/vfh_status.c cmd/videofromhell/vfh_status_test.c \
+		$(CJSON_DIR)/cJSON.c -lpthread -o build/tests/vfh-status-test
+	@build/tests/vfh-status-test
+
 srt-test:
 	@mkdir -p build/tests
 	@$(CC) -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Icmd/videofromhell \
 		cmd/videofromhell/vfh_srt.c cmd/videofromhell/vfh_srt_test.c \
 		-o build/tests/vfh-srt-test
 	@build/tests/vfh-srt-test
+
+launch-test:
+	@sh ./scripts/launch-smoke.sh
 
 package-platform:
 	@test -n "$(PLATFORM)" || { echo "usage: make package-platform PLATFORM=<platform>" >&2; exit 1; }

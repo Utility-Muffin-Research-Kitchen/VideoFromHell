@@ -40,6 +40,12 @@ int vfh_sources_resolve(vfh_sources *out, char *error, size_t error_size);
 int vfh_sources_parse(vfh_sources *out, const char *video_paths,
                       char *error, size_t error_size);
 
+/* Resolve the singular, primary-owned gameplay-capture root. This remains
+   separate from VIDEO_PATHS because Jawaka's conversion pass is primary-only:
+   recordings are not a second plural video source. The directory need not
+   exist yet; a fresh install simply has no gameplay captures to show. */
+int vfh_recordings_path_resolve(char *out, size_t out_size);
+
 /* Always return one primary source even if VIDEO_PATHS is malformed, allowing
    the browser to show a degraded empty library instead of refusing to launch. */
 void vfh_sources_single_fallback(vfh_sources *out);

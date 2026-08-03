@@ -26,6 +26,40 @@ int main(void) {
     assert((app_dir_stat.st_mode & 0777) == 0755);
     umask(previous_umask);
 
+    /* An all-under-cutoff legacy map must still be retired only after an empty
+       playback-v2.json has committed, otherwise each launch retries migration. */
+    char legacy_path[1024], playback_path[1024];
+    snprintf(legacy_path, sizeof(legacy_path), "%s/VideoFromHell/resume.json", base);
+    FILE *legacy = fopen(legacy_path, "wb");
+    assert(legacy);
+    fputs("{\"/mnt/sdcard/Videos/too-short.mkv\":30}", legacy);
+    assert(fclose(legacy) == 0);
+    assert(vfh_resume_get("/mnt/sdcard/Videos/too-short.mkv") == 0.0);
+    snprintf(playback_path, sizeof(playback_path), "%s/VideoFromHell/playback-v2.json", base);
+    assert(access(playback_path, F_OK) == 0);
+    assert(access(legacy_path, F_OK) != 0);
+
+    /* The first usable legacy position imports atomically, then retires the
+       old file only after playback-v2.json exists. */
+    legacy = fopen(legacy_path, "wb");
+    assert(legacy);
+    fputs("{\"/mnt/sdcard/Videos/legacy.mkv\":88}", legacy);
+    assert(fclose(legacy) == 0);
+    assert(vfh_resume_get("/mnt/sdcard/Videos/legacy.mkv") == 88.0);
+    assert(access(playback_path, F_OK) == 0);
+    assert(access(legacy_path, F_OK) != 0);
+
+    /* New records use the stable catalog identity rather than an SD mount
+       path, while an available legacy absolute path promotes itself on read. */
+    vfh_resume_identity identity = {
+        .content_kind = VFH_CONTENT_VIDEO,
+        .source_index = 1,
+        .relative_path = "Films/identity.mkv",
+    };
+    const char *identity_path = "/media/sdcard1/Videos/Films/identity.mkv";
+    vfh_resume_set_identity(&identity, identity_path, 321.0, 1000.0);
+    assert(vfh_resume_get_identity(&identity, identity_path) == 321.0);
+
     /* A position inside the film round-trips. */
     vfh_resume_set(film, 615.0, 3600.0);
     assert(vfh_resume_get(film) == 615.0);
@@ -35,11 +69,18 @@ int main(void) {
     vfh_resume_set(film, 5.0, 3600.0);
     assert(vfh_resume_get(film) == 0.0);
 
-    /* Reaching the end clears the entry -- a finished film must start clean
-       next time rather than resuming three seconds from the credits. */
+    /* At 90% the film is watched and must start clean next time.  Keep the
+       exact boundary explicit: it is part of the player contract. */
     vfh_resume_set(film, 900.0, 3600.0);
     assert(vfh_resume_get(film) > 0.0);
-    vfh_resume_set(film, 3595.0, 3600.0);
+    vfh_resume_set(film, 899.0, 1000.0);
+    assert(vfh_resume_get(film) == 899.0);
+    vfh_resume_set(film, 900.0, 1000.0);
+    assert(vfh_resume_get(film) == 0.0);
+    vfh_resume_set(film, 901.0, 1000.0);
+    assert(vfh_resume_get(film) == 0.0);
+    vfh_resume_set(film, 300.0, 1000.0);
+    vfh_resume_mark_watched(film, 1000.0);
     assert(vfh_resume_get(film) == 0.0);
 
     /* Unknown duration (0) must still store: it only disables the end check. */
@@ -53,9 +94,7 @@ int main(void) {
     assert(vfh_resume_get(other) == 120.0);
 
     /* A corrupt store must read as "no resume point", never crash or wedge. */
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/VideoFromHell/resume.json", base);
-    FILE *fp = fopen(path, "wb");
+    FILE *fp = fopen(playback_path, "wb");
     assert(fp);
     fputs("{ this is not json", fp);
     fclose(fp);

@@ -30,7 +30,7 @@ LDFLAGS  := -L$(SYSROOT)/usr/lib -lSDL2 -lSDL2_ttf -lSDL2_image -lasound -lm -lp
 
 # The actual decoder remains the vendor runtime: these SONAME stubs record the
 # FFmpeg 4.4 ABI at link time and are never packaged into the pak.
-OBJ := $(OBJDIR)/main.o $(OBJDIR)/vfh_sources.o $(OBJDIR)/vfh_media.o \
+OBJ := $(OBJDIR)/main.o $(OBJDIR)/vfh_sources.o $(OBJDIR)/vfh_library.o $(OBJDIR)/vfh_queue.o $(OBJDIR)/vfh_status.o $(OBJDIR)/vfh_osd.o $(OBJDIR)/vfh_art.o $(OBJDIR)/vfh_media.o \
 	$(OBJDIR)/vfh_thumb.o $(OBJDIR)/vfh_player.o $(OBJDIR)/vfh_mpp.o \
 	$(OBJDIR)/vfh_inhibit.o $(OBJDIR)/vfh_resume.o $(OBJDIR)/vfh_srt.o \
 	$(OBJDIR)/cJSON.o
@@ -61,6 +61,21 @@ $(OBJDIR)/main.o: $(SRC)/main.c | $(OBJDIR)
 	$(CC) $(APP_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/vfh_sources.o: $(SRC)/vfh_sources.c $(SRC)/vfh_sources.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_library.o: $(SRC)/vfh_library.c $(SRC)/vfh_library.h $(SRC)/vfh_sources.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_osd.o: $(SRC)/vfh_osd.c $(SRC)/vfh_osd.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_art.o: $(SRC)/vfh_art.c $(SRC)/vfh_art.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_queue.o: $(SRC)/vfh_queue.c $(SRC)/vfh_queue.h $(SRC)/vfh_library.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_status.o: $(SRC)/vfh_status.c $(SRC)/vfh_status.h | $(OBJDIR)
 	$(CC) $(APP_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/vfh_media.o: $(SRC)/vfh_media.c $(SRC)/vfh_media.h | $(OBJDIR)

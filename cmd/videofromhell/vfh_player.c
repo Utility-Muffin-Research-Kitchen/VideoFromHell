@@ -16,6 +16,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/log.h>
@@ -89,6 +90,11 @@ struct vfh_player {
     bool video_thread_started;
     bool audio_thread_started;
     snd_pcm_t *pcm;
+    bool current_bluetooth;
+    atomic_bool desired_bluetooth;
+    atomic_bool audio_reopen_pending;
+    pthread_mutex_t audio_notice_mutex;
+    char audio_notice[128];
 
     atomic_bool stop;
     atomic_bool paused;
@@ -108,6 +114,8 @@ struct vfh_player {
     bool seek_pending;
     double seek_target;
 };
+
+static bool vfh_reopen_audio_output(vfh_player *player);
 
 static void vfh_packet_item_free(vfh_packet_item *item) {
     if (!item) return;
@@ -495,6 +503,8 @@ static bool vfh_audio_write(vfh_player *player, const int16_t *samples,
     int offset = 0;
     while (offset < frames && !atomic_load(&player->stop)) {
         if (generation != atomic_load(&player->generation)) return false;
+        (void)vfh_reopen_audio_output(player);
+        if (!player->pcm) return false;
         snd_pcm_sframes_t written = snd_pcm_writei(player->pcm,
                                                     samples + (size_t)offset * player->audio_channels,
                                                     (snd_pcm_uframes_t)(frames - offset));
@@ -548,9 +558,14 @@ static void *vfh_audio_thread_main(void *opaque) {
     bool pcm_paused = false;
     while (!atomic_load(&player->stop)) {
         if (atomic_load(&player->paused)) {
+            bool reopened = vfh_reopen_audio_output(player);
             if (!pcm_paused) {
                 snd_pcm_drop(player->pcm);
                 pcm_paused = true;
+            } else if (reopened) {
+                /* The replacement starts prepared; keep pause semantics across
+                   a live route change rather than emitting a brief audio burst. */
+                snd_pcm_drop(player->pcm);
             }
             usleep(10000);
             continue;
@@ -559,6 +574,7 @@ static void *vfh_audio_thread_main(void *opaque) {
             snd_pcm_prepare(player->pcm);
             pcm_paused = false;
         }
+        (void)vfh_reopen_audio_output(player);
         unsigned long current = atomic_load(&player->generation);
         if (current != local_generation) {
             local_generation = current;
@@ -656,6 +672,59 @@ static bool vfh_open_decoder(AVFormatContext *format, int stream_index,
     return true;
 }
 
+static bool vfh_output_is_bluetooth(const char *output) {
+    return output && strcasecmp(output, "BLUETOOTH") == 0;
+}
+
+static bool vfh_open_pcm(vfh_player *player, bool bluetooth, snd_pcm_t **out_pcm) {
+    *out_pcm = NULL;
+    const char *device = bluetooth ? "bluealsa" : "default";
+    snd_pcm_t *pcm = NULL;
+    if (snd_pcm_open(&pcm, device, SND_PCM_STREAM_PLAYBACK, 0) < 0) return false;
+    if (snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16, SND_PCM_ACCESS_RW_INTERLEAVED,
+                           player->audio_channels, player->audio_rate, 1, 200000) < 0) {
+        snd_pcm_close(pcm);
+        return false;
+    }
+    *out_pcm = pcm;
+    return true;
+}
+
+static void vfh_set_audio_notice(vfh_player *player, const char *notice) {
+    pthread_mutex_lock(&player->audio_notice_mutex);
+    snprintf(player->audio_notice, sizeof(player->audio_notice), "%s", notice ? notice : "");
+    pthread_mutex_unlock(&player->audio_notice_mutex);
+}
+
+/* The audio thread owns player->pcm while playback is active.  It is therefore
+ * the only context allowed to replace it, avoiding races with snd_pcm_writei
+ * while the UI applies live Jawaka status updates. */
+static bool vfh_reopen_audio_output(vfh_player *player) {
+    if (!atomic_exchange(&player->audio_reopen_pending, false)) return false;
+    bool desired_bluetooth = atomic_load(&player->desired_bluetooth);
+    if (desired_bluetooth == player->current_bluetooth) return false;
+
+    snd_pcm_t *replacement = NULL;
+    bool actual_bluetooth = desired_bluetooth;
+    if (!vfh_open_pcm(player, desired_bluetooth, &replacement)) {
+        actual_bluetooth = false;
+        if (!desired_bluetooth || !vfh_open_pcm(player, false, &replacement)) {
+            vfh_set_audio_notice(player, desired_bluetooth
+                                 ? "Bluetooth output is unavailable; keeping the current output."
+                                 : "System audio output is unavailable; keeping the current output.");
+            return false;
+        }
+        vfh_set_audio_notice(player, "Bluetooth output is unavailable; using system output.");
+    }
+    if (player->pcm) {
+        snd_pcm_drop(player->pcm);
+        snd_pcm_close(player->pcm);
+    }
+    player->pcm = replacement;
+    player->current_bluetooth = actual_bluetooth;
+    return true;
+}
+
 static bool vfh_open_audio_output(vfh_player *player) {
     if (player->audio_stream < 0) return true;
     player->audio_channels = (unsigned)player->audio_codec->channels;
@@ -669,18 +738,14 @@ static bool vfh_open_audio_output(vfh_player *player) {
                                            player->audio_codec->sample_fmt,
                                            (int)player->audio_rate, 0, NULL);
     if (!player->resampler || swr_init(player->resampler) < 0) return false;
-    const char *output = getenv("JAWAKA_AUDIO_OUTPUT");
-    const char *device = output && strcasecmp(output, "BLUETOOTH") == 0 ? "bluealsa" : "default";
-    if (snd_pcm_open(&player->pcm, device, SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-        player->pcm = NULL;
-        if (strcmp(device, "default") == 0 ||
-            snd_pcm_open(&player->pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0)
-            return false;
+    bool desired_bluetooth = atomic_load(&player->desired_bluetooth);
+    if (!vfh_open_pcm(player, desired_bluetooth, &player->pcm)) {
+        if (!desired_bluetooth || !vfh_open_pcm(player, false, &player->pcm)) return false;
+        vfh_set_audio_notice(player, "Bluetooth output is unavailable; using system output.");
+        player->current_bluetooth = false;
+    } else {
+        player->current_bluetooth = desired_bluetooth;
     }
-    if (snd_pcm_set_params(player->pcm, SND_PCM_FORMAT_S16,
-                           SND_PCM_ACCESS_RW_INTERLEAVED, player->audio_channels,
-                           player->audio_rate, 1, 200000) < 0)
-        return false;
     return true;
 }
 
@@ -695,8 +760,13 @@ vfh_player *vfh_player_create(void) {
     atomic_init(&player->video_done, false);
     atomic_init(&player->audio_done, true);
     atomic_init(&player->generation, 1);
+    const char *output = getenv("JAWAKA_AUDIO_OUTPUT");
+    if (!output || !output[0]) output = getenv("UMRK_AUDIO_OUTPUT");
+    atomic_init(&player->desired_bluetooth, vfh_output_is_bluetooth(output));
+    atomic_init(&player->audio_reopen_pending, false);
     pthread_mutex_init(&player->state_mutex, NULL);
     pthread_mutex_init(&player->seek_mutex, NULL);
+    pthread_mutex_init(&player->audio_notice_mutex, NULL);
     vfh_packet_queue_init(&player->video_packets);
     vfh_packet_queue_init(&player->audio_packets);
     vfh_frame_queue_init(&player->video_frames);
@@ -733,6 +803,7 @@ void vfh_player_destroy(vfh_player *player) {
     vfh_frame_queue_destroy(&player->video_frames);
     pthread_mutex_destroy(&player->seek_mutex);
     pthread_mutex_destroy(&player->state_mutex);
+    pthread_mutex_destroy(&player->audio_notice_mutex);
     free(player);
 }
 
@@ -806,6 +877,27 @@ bool vfh_player_is_paused(const vfh_player *player) {
     return player && atomic_load(&player->paused);
 }
 
+void vfh_player_set_audio_output(vfh_player *player, const char *output) {
+    if (!player) return;
+    bool bluetooth = vfh_output_is_bluetooth(output);
+    if (atomic_exchange(&player->desired_bluetooth, bluetooth) != bluetooth)
+        atomic_store(&player->audio_reopen_pending, true);
+}
+
+bool vfh_player_take_audio_notice(vfh_player *player, char *out, int out_size) {
+    if (!player || !out || out_size < 1) return false;
+    pthread_mutex_lock(&player->audio_notice_mutex);
+    bool has_notice = player->audio_notice[0] != '\0';
+    if (has_notice) {
+        snprintf(out, (size_t)out_size, "%s", player->audio_notice);
+        player->audio_notice[0] = '\0';
+    } else {
+        out[0] = '\0';
+    }
+    pthread_mutex_unlock(&player->audio_notice_mutex);
+    return has_notice;
+}
+
 void vfh_player_seek_relative(vfh_player *player, double seconds) {
     if (!player || atomic_load(&player->stop)) return;
     double target = vfh_clock(player) + seconds;
@@ -876,4 +968,54 @@ double vfh_player_duration(const vfh_player *player) {
 
 bool vfh_player_has_audio(const vfh_player *player) {
     return player && player->audio_stream >= 0;
+}
+
+static const char *vfh_player_codec_name(const AVCodecParameters *parameters) {
+    if (!parameters) return "Unknown";
+    AVCodec *codec = avcodec_find_decoder(parameters->codec_id);
+    return codec && codec->name ? codec->name : "Unknown";
+}
+
+bool vfh_player_get_media_info(const vfh_player *player, vfh_player_media_info *out_info) {
+    if (!out_info) return false;
+    memset(out_info, 0, sizeof(*out_info));
+    if (!player || !player->format || player->video_stream < 0) return false;
+
+    const AVInputFormat *input = player->format->iformat;
+    const AVCodecParameters *video = player->format->streams[player->video_stream]->codecpar;
+    snprintf(out_info->container, sizeof(out_info->container), "%s",
+             input && input->long_name ? input->long_name :
+             input && input->name ? input->name : "Unknown");
+    snprintf(out_info->video_codec, sizeof(out_info->video_codec), "%s",
+             vfh_player_codec_name(video));
+    out_info->video_width = video ? video->width : 0;
+    out_info->video_height = video ? video->height : 0;
+    if (player->audio_stream >= 0) {
+        const AVCodecParameters *audio = player->format->streams[player->audio_stream]->codecpar;
+        snprintf(out_info->audio_codec, sizeof(out_info->audio_codec), "%s",
+                 vfh_player_codec_name(audio));
+    } else {
+        snprintf(out_info->audio_codec, sizeof(out_info->audio_codec), "%s", "None");
+    }
+    return true;
+}
+
+int vfh_player_chapter_count(const vfh_player *player) {
+    if (!player || !player->format) return 0;
+    return player->format->nb_chapters > 64 ? 64 : (int)player->format->nb_chapters;
+}
+
+bool vfh_player_chapter_get(const vfh_player *player, int index, vfh_player_chapter *out_chapter) {
+    if (!out_chapter || index < 0 || index >= vfh_player_chapter_count(player)) return false;
+    AVChapter *chapter = player->format->chapters[index];
+    if (!chapter || chapter->time_base.den == 0) return false;
+    memset(out_chapter, 0, sizeof(*out_chapter));
+    out_chapter->start_seconds = (double)chapter->start * (double)chapter->time_base.num /
+                                 (double)chapter->time_base.den;
+    AVDictionaryEntry *title = av_dict_get(chapter->metadata, "title", NULL, 0);
+    if (title && title->value && title->value[0])
+        snprintf(out_chapter->title, sizeof(out_chapter->title), "%s", title->value);
+    else
+        snprintf(out_chapter->title, sizeof(out_chapter->title), "Chapter %d", index + 1);
+    return true;
 }

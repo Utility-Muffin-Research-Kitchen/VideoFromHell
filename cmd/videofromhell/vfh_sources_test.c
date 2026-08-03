@@ -56,6 +56,19 @@ int main(void) {
     assert(strstr(vfh_source_state_message(&sources.items[1]), "not mounted") != NULL);
     unsetenv("VFH_SOURCE_TEST_AVAILABLE");
 
+    char recordings[1024];
+    setenv("RECORDINGS_PATH", "/fixture/recordings-contract", 1);
+    assert(vfh_recordings_path_resolve(recordings, sizeof(recordings)));
+    assert(strcmp(recordings, "/fixture/recordings-contract") == 0);
+    unsetenv("RECORDINGS_PATH");
+    setenv("SDCARD_PATH", primary, 1);
+    assert(vfh_recordings_path_resolve(recordings, sizeof(recordings)));
+    snprintf(list, sizeof(list), "%s/Recordings", primary);
+    assert(strcmp(recordings, list) == 0);
+    unsetenv("SDCARD_PATH");
+    assert(vfh_recordings_path_resolve(recordings, sizeof(recordings)));
+    assert(strcmp(recordings, "./Recordings") == 0);
+
     setenv("SDCARD_PATHS", "/card1:/card2:/card3", 1);
     assert(!vfh_sources_resolve(&sources, error, sizeof(error)));
     assert(sources.count == 0);

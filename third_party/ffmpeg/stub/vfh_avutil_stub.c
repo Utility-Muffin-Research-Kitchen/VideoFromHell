@@ -1,5 +1,6 @@
 /* Link-time FFmpeg 4.4 ABI declarations only; never packaged or executed. */
 #include <libavutil/channel_layout.h>
+#include <libavutil/dict.h>
 #include <libavutil/frame.h>
 #include <libavutil/log.h>
 
@@ -33,4 +34,13 @@ int64_t av_get_default_channel_layout(int nb_channels) {
 
 void av_log_set_level(int level) {
     (void)level;
+}
+
+AVDictionaryEntry *av_dict_get(const AVDictionary *metadata, const char *key,
+                               const AVDictionaryEntry *previous, int flags) {
+    (void)metadata;
+    (void)key;
+    (void)previous;
+    (void)flags;
+    return NULL;
 }

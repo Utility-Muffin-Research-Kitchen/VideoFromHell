@@ -242,6 +242,23 @@ int vfh_sources_resolve(vfh_sources *out, char *error, size_t error_size) {
     return 1;
 }
 
+int vfh_recordings_path_resolve(char *out, size_t out_size) {
+    if (!out || out_size == 0) return 0;
+    const char *recordings = getenv("RECORDINGS_PATH");
+    char fallback[VFH_SOURCE_PATH_MAX];
+    if (!recordings || !recordings[0]) {
+        const char *sd = getenv("SDCARD_PATH");
+        if (sd && sd[0]) {
+            int written = snprintf(fallback, sizeof(fallback), "%s/Recordings", sd);
+            if (written < 0 || written >= (int)sizeof(fallback)) return 0;
+        } else {
+            snprintf(fallback, sizeof(fallback), "./Recordings");
+        }
+        recordings = fallback;
+    }
+    return vfh_source_normalize(recordings, out, out_size);
+}
+
 void vfh_sources_single_fallback(vfh_sources *out) {
     if (!out) return;
     memset(out, 0, sizeof(*out));
