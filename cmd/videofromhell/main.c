@@ -10,8 +10,6 @@
 #define CAT_WIDGETS_IMPLEMENTATION
 #include "catastrophe_widgets.h"
 
-#include <dirent.h>
-#include <errno.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -36,11 +34,9 @@
 #include "vfh_status.h"
 #include "vfh_thumb.h"
 
-#define VFH_ENTRY_MAX 768
 #define VFH_NAME_MAX 256
 
 typedef enum {
-    VFH_ENTRY_SOURCE,
     VFH_ENTRY_PARENT,
     VFH_ENTRY_DIRECTORY,
     VFH_ENTRY_VIDEO,
@@ -100,11 +96,9 @@ typedef struct {
     vfh_queue queue;
     vfh_status_monitor audio_status;
     char audio_output[VFH_AUDIO_OUTPUT_MAX];
-    vfh_entry entries[VFH_ENTRY_MAX];
+    vfh_entry *entries;
     int entry_count;
-    int active_source;
-    bool source_menu;
-    bool merged_library;
+    size_t entry_capacity;
     vfh_library_tab tab;
     cat_list_state tab_lists[VFH_TAB_COUNT];
     char folder_relative[VFH_LIBRARY_RELATIVE_PATH_MAX];
@@ -114,7 +108,6 @@ typedef struct {
     vfh_rescan_worker rescan;
     bool rescan_needs_resume;
     char recordings_path[VFH_SOURCE_PATH_MAX];
-    char directory[VFH_SOURCE_PATH_MAX];
     char message[256];
     cat_list_state list;
     vfh_thumb_worker thumbs;
@@ -216,9 +209,8 @@ static int vfh_entry_rank(vfh_entry_kind kind) {
         case VFH_ENTRY_PARENT: return 0;
         case VFH_ENTRY_DIRECTORY: return 1;
         case VFH_ENTRY_VIDEO: return 2;
-        case VFH_ENTRY_SOURCE: return 3;
     }
-    return 4;
+    return 3;
 }
 
 static int vfh_entry_compare(const void *a, const void *b) {
@@ -316,9 +308,23 @@ static void vfh_set_message(vfh_browser *browser, const char *message) {
     if (message && message[0]) cat_log("videofromhell: %s", message);
 }
 
-static void vfh_add_entry(vfh_browser *browser, vfh_entry_kind kind,
+static bool vfh_entries_reserve(vfh_browser *browser, size_t wanted) {
+    if (!browser || wanted > VFH_LIBRARY_MAX_RECORDS) return false;
+    if (wanted <= browser->entry_capacity) return true;
+    size_t capacity = browser->entry_capacity ? browser->entry_capacity * 2u : 32u;
+    if (capacity < wanted) capacity = wanted;
+    if (capacity > VFH_LIBRARY_MAX_RECORDS) capacity = VFH_LIBRARY_MAX_RECORDS;
+    vfh_entry *entries = realloc(browser->entries, capacity * sizeof(*entries));
+    if (!entries) return false;
+    browser->entries = entries;
+    browser->entry_capacity = capacity;
+    return true;
+}
+
+static bool vfh_add_entry(vfh_browser *browser, vfh_entry_kind kind,
                           const char *name, const char *path, int source_index) {
-    if (browser->entry_count >= VFH_ENTRY_MAX) return;
+    if (!browser || !vfh_entries_reserve(browser, (size_t)browser->entry_count + 1u))
+        return false;
     vfh_entry *entry = &browser->entries[browser->entry_count++];
     memset(entry, 0, sizeof(*entry));
     entry->kind = kind;
@@ -326,71 +332,19 @@ static void vfh_add_entry(vfh_browser *browser, vfh_entry_kind kind,
     entry->catalog_index = -1;
     snprintf(entry->name, sizeof(entry->name), "%s", name ? name : "");
     snprintf(entry->path, sizeof(entry->path), "%s", path ? path : "");
-}
-
-static void vfh_scan_directory(vfh_browser *browser) {
-    browser->entry_count = 0;
-    cat_list_state_init(&browser->list, 1);
-    vfh_clear_poster(browser);
-    if (browser->active_source < 0 || browser->active_source >= browser->sources.count) return;
-    const vfh_source *source = &browser->sources.items[browser->active_source];
-    if (!source->available) {
-        char problem[256];
-        if (source->state == VFH_SOURCE_NO_FOLDER)
-            snprintf(problem, sizeof(problem), "No videos yet — create %s", source->root);
-        else
-            snprintf(problem, sizeof(problem), "%s", vfh_source_state_message(source));
-        vfh_set_message(browser, problem);
-        return;
-    }
-    if (strcmp(browser->directory, source->root) != 0)
-        vfh_add_entry(browser, VFH_ENTRY_PARENT, "..", source->root, browser->active_source);
-
-    DIR *dir = opendir(browser->directory);
-    if (!dir) {
-        char problem[256];
-        snprintf(problem, sizeof(problem), "Unable to read Videos: %s", strerror(errno));
-        vfh_set_message(browser, problem);
-        return;
-    }
-    struct dirent *item;
-    while ((item = readdir(dir)) != NULL) {
-        if (item->d_name[0] == '.') continue;
-        if (browser->entry_count >= VFH_ENTRY_MAX) break;
-        char path[VFH_SOURCE_PATH_MAX];
-        int written = snprintf(path, sizeof(path), "%s/%s", browser->directory, item->d_name);
-        if (written < 0 || written >= (int)sizeof(path)) continue;
-        struct stat st;
-        if (stat(path, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            vfh_add_entry(browser, VFH_ENTRY_DIRECTORY, item->d_name, path, browser->active_source);
-        } else if (S_ISREG(st.st_mode) && vfh_media_file_supported(item->d_name)) {
-            vfh_add_entry(browser, VFH_ENTRY_VIDEO, item->d_name, path, browser->active_source);
-            vfh_entry *entry = &browser->entries[browser->entry_count - 1];
-            entry->has_duration = vfh_media_probe_duration(path, &entry->duration);
-        }
-    }
-    closedir(dir);
-    qsort(browser->entries, (size_t)browser->entry_count, sizeof(browser->entries[0]),
-          vfh_entry_compare);
-    if (browser->entry_count == VFH_ENTRY_MAX)
-        vfh_set_message(browser, "Folder is large; showing the first 768 items.");
-    else if (browser->entry_count == 0)
-        vfh_set_message(browser, "No supported videos in this folder.");
-    else
-        browser->message[0] = '\0';
+    return true;
 }
 
 static void vfh_add_catalog_video(vfh_browser *browser,
                                   const vfh_resume_snapshot *resume_snapshot,
                                   size_t catalog_index) {
-    if (!browser || catalog_index >= browser->catalog.count ||
-        browser->entry_count >= VFH_ENTRY_MAX) return;
+    if (!browser || catalog_index >= browser->catalog.count) return;
     const vfh_library_item *item = &browser->catalog.items[catalog_index];
     char path[VFH_SOURCE_PATH_MAX];
     if (!vfh_library_resolve_path(item, &browser->sources, browser->recordings_path,
                                   path, sizeof(path))) return;
-    vfh_add_entry(browser, VFH_ENTRY_VIDEO, item->display_title, path, item->source_index);
+    if (!vfh_add_entry(browser, VFH_ENTRY_VIDEO, item->display_title, path, item->source_index))
+        return;
     vfh_entry *entry = &browser->entries[browser->entry_count - 1];
     entry->available = item->available;
     entry->has_duration = item->duration > 0.0;
@@ -428,7 +382,7 @@ static void vfh_add_folder(vfh_browser *browser, const char *name,
                            const char *relative, bool recordings) {
     if (!browser || !name || !relative || vfh_folder_already_listed(browser, relative, recordings))
         return;
-    vfh_add_entry(browser, VFH_ENTRY_DIRECTORY, name, relative, 0);
+    if (!vfh_add_entry(browser, VFH_ENTRY_DIRECTORY, name, relative, 0)) return;
     browser->entries[browser->entry_count - 1].recordings_folder = recordings;
 }
 
@@ -561,7 +515,6 @@ static void vfh_build_folders_view(vfh_browser *browser,
 
 static void vfh_scan_catalog(vfh_browser *browser) {
     browser->entry_count = 0;
-    browser->source_menu = false;
     vfh_clear_poster(browser);
     vfh_resume_snapshot resume_snapshot;
     vfh_resume_snapshot_init(&resume_snapshot);
@@ -574,9 +527,7 @@ static void vfh_scan_catalog(vfh_browser *browser) {
     }
     vfh_resume_snapshot_destroy(&resume_snapshot);
     vfh_restore_current_list(browser);
-    if (browser->entry_count == VFH_ENTRY_MAX)
-        vfh_set_message(browser, "Library is large; showing the first 768 items.");
-    else if (browser->entry_count == 0) {
+    if (browser->entry_count == 0) {
         if (browser->tab == VFH_TAB_CONTINUE)
             vfh_set_message(browser, "Nothing to continue watching yet.");
         else if (browser->tab == VFH_TAB_FOLDERS && browser->folder_recordings)
@@ -719,59 +670,23 @@ static void vfh_rescan_cancel(vfh_browser *browser, bool resume_when_browsing) {
     if (resume_when_browsing) browser->rescan_needs_resume = true;
 }
 
-static void vfh_show_source_menu(vfh_browser *browser) {
-    browser->source_menu = true;
-    browser->active_source = -1;
-    browser->entry_count = 0;
-    cat_list_state_init(&browser->list, 1);
-    vfh_clear_poster(browser);
-    for (int i = 0; i < browser->sources.count; i++) {
-        const vfh_source *source = &browser->sources.items[i];
-        vfh_add_entry(browser, VFH_ENTRY_SOURCE, source->label, source->root, i);
-        browser->entries[browser->entry_count - 1].available = source->available;
-    }
-}
-
-static void vfh_open_source(vfh_browser *browser, int source_index) {
-    if (source_index < 0 || source_index >= browser->sources.count) return;
-    browser->source_menu = false;
-    browser->active_source = source_index;
-    snprintf(browser->directory, sizeof(browser->directory), "%s",
-             browser->sources.items[source_index].root);
-    vfh_scan_directory(browser);
-}
-
 static void vfh_parent_directory(vfh_browser *browser) {
-    if (browser->merged_library) {
-        if (browser->tab != VFH_TAB_FOLDERS) return;
-        vfh_store_current_list(browser);
-        if (browser->folder_recordings && !browser->folder_relative[0]) {
-            browser->folder_recordings = false;
-        } else if (browser->folder_relative[0]) {
-            char *slash = strrchr(browser->folder_relative, '/');
-            if (slash) *slash = '\0';
-            else browser->folder_relative[0] = '\0';
-        } else {
-            return;
-        }
-        vfh_scan_catalog(browser);
+    if (!browser || browser->tab != VFH_TAB_FOLDERS) return;
+    vfh_store_current_list(browser);
+    if (browser->folder_recordings && !browser->folder_relative[0]) {
+        browser->folder_recordings = false;
+    } else if (browser->folder_relative[0]) {
+        char *slash = strrchr(browser->folder_relative, '/');
+        if (slash) *slash = '\0';
+        else browser->folder_relative[0] = '\0';
+    } else {
         return;
     }
-    if (browser->source_menu) return;
-    const char *root = browser->sources.items[browser->active_source].root;
-    if (strcmp(browser->directory, root) == 0) {
-        if (browser->sources.count > 1) vfh_show_source_menu(browser);
-        return;
-    }
-    char *slash = strrchr(browser->directory, '/');
-    if (slash && slash != browser->directory) *slash = '\0';
-    else snprintf(browser->directory, sizeof(browser->directory), "%s", root);
-    vfh_scan_directory(browser);
+    vfh_scan_catalog(browser);
 }
 
 static void vfh_sync_poster(vfh_browser *browser) {
-    if (browser->source_menu || browser->list.cursor < 0 ||
-        browser->list.cursor >= browser->entry_count) {
+    if (browser->list.cursor < 0 || browser->list.cursor >= browser->entry_count) {
         vfh_clear_poster(browser);
         return;
     }
@@ -829,13 +744,7 @@ static void vfh_draw_entry(int index, int x, int y, int w, int h,
     }
     const char *kind = "";
     char meta[48] = "";
-    if (entry->kind == VFH_ENTRY_SOURCE) {
-        switch (browser->sources.items[entry->source_index].state) {
-            case VFH_SOURCE_OK:        kind = "Videos"; break;
-            case VFH_SOURCE_NO_CARD:   kind = "Not mounted"; break;
-            case VFH_SOURCE_NO_FOLDER: kind = "No Videos folder"; break;
-        }
-    } else if (entry->kind == VFH_ENTRY_PARENT) {
+    if (entry->kind == VFH_ENTRY_PARENT) {
         kind = "Up";
     } else if (entry->kind == VFH_ENTRY_DIRECTORY) {
         kind = entry->recordings_folder ? "Gameplay" : "Folder";
@@ -932,8 +841,7 @@ static void vfh_draw_preview(vfh_browser *browser, SDL_Rect preview) {
     cat_draw_color panel = theme->text;
     panel.a = 18;
     cat_draw_rounded_rect(preview.x, preview.y, preview.w, preview.h, cat_scale(10), panel);
-    if (browser->source_menu || browser->list.cursor < 0 ||
-        browser->list.cursor >= browser->entry_count) return;
+    if (browser->list.cursor < 0 || browser->list.cursor >= browser->entry_count) return;
     vfh_entry *entry = &browser->entries[browser->list.cursor];
     if (entry->kind != VFH_ENTRY_VIDEO) {
         cat_draw_text(cat_get_font(CAT_FONT_LARGE), entry->kind == VFH_ENTRY_DIRECTORY ? "Folder" : "Videos",
@@ -941,7 +849,7 @@ static void vfh_draw_preview(vfh_browser *browser, SDL_Rect preview) {
         cat_draw_text_wrapped(cat_get_font(CAT_FONT_SMALL),
                               entry->kind == VFH_ENTRY_DIRECTORY
                                   ? "Press A to browse this folder."
-                                  : "Choose an SD source to browse its Videos folder.",
+                                  : "Press B to return to the parent folder.",
                               preview.x + pad, preview.y + pad + TTF_FontHeight(cat_get_font(CAT_FONT_LARGE)) + cat_scale(8),
                               preview.w - pad * 2, theme->hint, CAT_ALIGN_LEFT);
         return;
@@ -971,21 +879,13 @@ static void vfh_draw_preview(vfh_browser *browser, SDL_Rect preview) {
 
 static void vfh_draw_browser(vfh_browser *browser) {
     cat_draw_background();
-    char title[256];
-    if (browser->merged_library) snprintf(title, sizeof(title), "Video Library");
-    else if (browser->source_menu) snprintf(title, sizeof(title), "Video Sources");
-    else snprintf(title, sizeof(title), "%s · %.235s",
-                  browser->sources.items[browser->active_source].label,
-                  vfh_basename(browser->directory));
-    cat_draw_screen_title(title, NULL);
+    cat_draw_screen_title("Video Library", NULL);
     SDL_Rect content = cat_get_content_rect(true, true, false);
     int tab_h = TTF_FontHeight(cat_get_font(CAT_FONT_MEDIUM)) + cat_scale(14);
     SDL_Rect tabs = { content.x, content.y, content.w, tab_h };
-    if (browser->merged_library) {
-        vfh_draw_tabbar(browser, tabs);
-        content.y += tab_h + cat_scale(4);
-        content.h -= tab_h + cat_scale(4);
-    }
+    vfh_draw_tabbar(browser, tabs);
+    content.y += tab_h + cat_scale(4);
+    content.h -= tab_h + cat_scale(4);
     int gap = cat_scale(10);
     bool has_preview = content.w >= cat_scale(430);
     SDL_Rect list_rect = content;
@@ -1007,9 +907,7 @@ static void vfh_draw_browser(vfh_browser *browser) {
                            browser->entry_count, &browser->list, item_h,
                            vfh_draw_entry, browser);
     } else {
-        const char *empty = browser->merged_library ? "No videos found" :
-                            browser->source_menu ? "No Video sources were published." : "No videos found";
-        cat_draw_text(cat_get_font(CAT_FONT_LARGE), empty,
+        cat_draw_text(cat_get_font(CAT_FONT_LARGE), "No videos found",
                       list_rect.x + cat_scale(12), list_rect.y + cat_scale(12), cat_get_theme()->text);
         if (browser->message[0])
             cat_draw_text_wrapped(cat_get_font(CAT_FONT_SMALL), browser->message,
@@ -1023,14 +921,13 @@ static void vfh_draw_browser(vfh_browser *browser) {
     if (has_preview) vfh_draw_preview(browser, preview);
     cat_footer_item footer[] = {
         { .button = CAT_BTN_MENU, .label = "Quit" },
-        { .button = CAT_BTN_B, .label = browser->merged_library ? "Back" :
-                                             browser->source_menu ? "Quit" : "Up" },
+        { .button = CAT_BTN_B, .label = "Back" },
         { .button = CAT_BTN_L1, .label = "Tabs", .button_text = "L/R" },
         { .button = CAT_BTN_SELECT, .label = "Rescan" },
         { .button = CAT_BTN_LEFT, .label = "Jump", .button_text = "<->" },
         { .button = CAT_BTN_X, .label = "Add Queue" },
         { .button = CAT_BTN_Y, .label = "Play Next" },
-        { .button = CAT_BTN_A, .label = browser->source_menu ? "Browse" : "Open", .is_confirm = true },
+        { .button = CAT_BTN_A, .label = "Open", .is_confirm = true },
     };
     cat_draw_footer(footer, 8);
 }
@@ -1655,31 +1552,14 @@ static void vfh_show_queue(vfh_browser *browser) {
 static void vfh_activate_entry(vfh_browser *browser) {
     if (browser->list.cursor < 0 || browser->list.cursor >= browser->entry_count) return;
     vfh_entry *entry = &browser->entries[browser->list.cursor];
-    if (entry->kind == VFH_ENTRY_SOURCE) {
-        if (!entry->available) {
-            const vfh_source *source = &browser->sources.items[entry->source_index];
-            char problem[256];
-            if (source->state == VFH_SOURCE_NO_FOLDER)
-                snprintf(problem, sizeof(problem), "No videos yet — create %s", source->root);
-            else
-                snprintf(problem, sizeof(problem), "%s", vfh_source_state_message(source));
-            vfh_set_message(browser, problem);
-            return;
-        }
-        vfh_open_source(browser, entry->source_index);
-    } else if (entry->kind == VFH_ENTRY_PARENT) {
+    if (entry->kind == VFH_ENTRY_PARENT) {
         vfh_parent_directory(browser);
     } else if (entry->kind == VFH_ENTRY_DIRECTORY) {
-        if (browser->merged_library) {
-            vfh_store_current_list(browser);
-            browser->folder_recordings = entry->recordings_folder;
-            snprintf(browser->folder_relative, sizeof(browser->folder_relative), "%s",
-                     entry->path);
-            vfh_scan_catalog(browser);
-        } else {
-            snprintf(browser->directory, sizeof(browser->directory), "%s", entry->path);
-            vfh_scan_directory(browser);
-        }
+        vfh_store_current_list(browser);
+        browser->folder_recordings = entry->recordings_folder;
+        snprintf(browser->folder_relative, sizeof(browser->folder_relative), "%.767s",
+                 entry->path);
+        vfh_scan_catalog(browser);
     } else {
         if (!entry->available) {
             const char *label = entry->content_kind == VFH_CONTENT_RECORDING ? "Recorded Gameplay"
@@ -1994,7 +1874,6 @@ int main(int argc, char *argv[]) {
 
     vfh_browser browser;
     memset(&browser, 0, sizeof(browser));
-    browser.active_source = -1;
     browser.tab = VFH_TAB_RECENT;
     vfh_osd_init(&browser.osd);
     for (int i = 0; i < VFH_TAB_COUNT; i++)
@@ -2017,7 +1896,6 @@ int main(int argc, char *argv[]) {
         vfh_set_message(&browser, "Live audio-output updates are unavailable.");
     (void)vfh_queue_load(&browser.queue);
     (void)vfh_library_load(&browser.catalog);
-    browser.merged_library = true;
     if (!vfh_recordings_path_resolve(browser.recordings_path, sizeof(browser.recordings_path)))
         vfh_set_message(&browser, "Gameplay recordings path is unavailable.");
     browser.thumb_worker_ready = vfh_thumb_worker_init(&browser.thumbs);
@@ -2173,8 +2051,7 @@ int main(int argc, char *argv[]) {
                     vfh_rescan_start(&browser);
                     break;
                 case CAT_BTN_B:
-                    if (browser.source_menu) running = false;
-                    else vfh_parent_directory(&browser);
+                    vfh_parent_directory(&browser);
                     break;
                 case CAT_BTN_MENU:
                     running = false;
@@ -2231,6 +2108,7 @@ int main(int argc, char *argv[]) {
     if (browser.thumb_worker_ready) vfh_thumb_worker_destroy(&browser.thumbs);
     (void)vfh_queue_save(&browser.queue);
     vfh_library_destroy(&browser.catalog);
+    free(browser.entries);
     cat_quit();
     return 0;
 }
