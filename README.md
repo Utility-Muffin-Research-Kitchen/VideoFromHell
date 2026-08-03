@@ -89,9 +89,10 @@ Useful narrower targets:
 make -C VideoFromHell mlp1
 make -C VideoFromHell probe-mlp1
 make -C VideoFromHell player-smoke-mlp1
+make -C VideoFromHell media-smoke-mlp1
 ```
 
-`vfh-probe` and `vfh-player-smoke` are hardware-decode acceptance tools, intentionally outside the pak. Regenerate the FFmpeg and MPP link stubs after changing their symbol surface with `./scripts/build-ffmpeg-link-stubs.sh`.
+`vfh-probe`, `vfh-player-smoke`, and `vfh-media-smoke` are target-only acceptance tools, intentionally outside the pak. The media smoke tool exercises VFH's own metadata and lazy-poster path, rather than an external `ffmpeg` command. Regenerate the FFmpeg and MPP link stubs after changing their symbol surface with `./scripts/build-ffmpeg-link-stubs.sh`.
 
 ## Credits
 

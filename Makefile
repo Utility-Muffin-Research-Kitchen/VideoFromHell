@@ -17,7 +17,7 @@ STUB_SOURCES := third_party/ffmpeg/stub/vfh_avformat_stub.c \
 	third_party/ffmpeg/stub/vfh_swscale_stub.c \
 	third_party/mpp/stub/vfh_mpp_stub.c
 
-.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test clean
+.PHONY: package-platform package-mlp1 package-archive package-smoke dist-pakrat mlp1 probe-mlp1 player-smoke-mlp1 media-smoke-mlp1 test pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test clean
 
 test: pakrat-metadata-check stubs-test sources-test library-test art-test osd-test resume-test queue-test status-test srt-test launch-test
 
@@ -111,6 +111,10 @@ probe-mlp1:
 # Test-only acceptance runner: opens the real player and requires NV12 output.
 player-smoke-mlp1:
 	@./scripts/build-mlp1.sh vfh-player-smoke
+
+# Test-only acceptance runner for VFH's metadata + poster decoder path.
+media-smoke-mlp1:
+	@./scripts/build-mlp1.sh vfh-media-smoke
 
 package-mlp1: mlp1
 	@rm -rf "$(MLP1_PACKAGE)"

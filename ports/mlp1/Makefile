@@ -36,14 +36,17 @@ OBJ := $(OBJDIR)/main.o $(OBJDIR)/vfh_sources.o $(OBJDIR)/vfh_library.o $(OBJDIR
 	$(OBJDIR)/cJSON.o
 PROBE_OUT := $(VFH)/build/mlp1/vfh-probe
 PLAYER_SMOKE_OUT := $(VFH)/build/mlp1/vfh-player-smoke
+MEDIA_SMOKE_OUT := $(VFH)/build/mlp1/vfh-media-smoke
 PROBE_OBJ := $(OBJDIR)/vfh_probe.o
 PLAYER_SMOKE_OBJ := $(OBJDIR)/vfh_player_smoke.o
+MEDIA_SMOKE_OBJ := $(OBJDIR)/vfh_media_smoke.o
 
-.PHONY: all clean vfh-probe vfh-player-smoke
+.PHONY: all clean vfh-probe vfh-player-smoke vfh-media-smoke
 all: $(OUT)
 
 vfh-probe: $(PROBE_OUT)
 vfh-player-smoke: $(PLAYER_SMOKE_OUT)
+vfh-media-smoke: $(MEDIA_SMOKE_OUT)
 
 $(OUT): $(OBJ)
 	mkdir -p $(dir $(OUT))
@@ -55,6 +58,10 @@ $(PROBE_OUT): $(PROBE_OBJ)
 
 $(PLAYER_SMOKE_OUT): $(PLAYER_SMOKE_OBJ) $(OBJDIR)/vfh_player.o $(OBJDIR)/vfh_mpp.o
 	mkdir -p $(dir $(PLAYER_SMOKE_OUT))
+	$(CC) -o $@ $^ $(LDFLAGS)
+
+$(MEDIA_SMOKE_OUT): $(MEDIA_SMOKE_OBJ) $(OBJDIR)/vfh_media.o
+	mkdir -p $(dir $(MEDIA_SMOKE_OUT))
 	$(CC) -o $@ $^ $(LDFLAGS)
 
 $(OBJDIR)/main.o: $(SRC)/main.c | $(OBJDIR)
@@ -103,6 +110,9 @@ $(OBJDIR)/vfh_probe.o: $(SRC)/vfh_probe.c $(MPP)/include/vfh_mpp_abi.h | $(OBJDI
 	$(CC) $(APP_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/vfh_player_smoke.o: $(SRC)/vfh_player_smoke.c $(SRC)/vfh_player.h | $(OBJDIR)
+	$(CC) $(APP_CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/vfh_media_smoke.o: $(SRC)/vfh_media_smoke.c $(SRC)/vfh_media.h | $(OBJDIR)
 	$(CC) $(APP_CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/cJSON.o: $(CJSON)/cJSON.c | $(OBJDIR)

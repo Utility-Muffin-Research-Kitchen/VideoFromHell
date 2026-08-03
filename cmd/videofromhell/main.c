@@ -660,7 +660,10 @@ static bool vfh_rescan_finish(vfh_browser *browser, bool wait) {
         memset(&worker->result, 0, sizeof(worker->result));
         vfh_scan_catalog(browser);
         /* A rescan is the explicit retry affordance for a previously terminal
-           thumbnail request; its marker is cleared at the next selection. */
+           thumbnail request. Invalidate the current selection too: waiting
+           for a cursor move would make a recovered poster look permanently
+           failed to the person who requested the rescan. */
+        vfh_clear_poster(browser);
         browser->poster_retry_pending = true;
         vfh_set_message(browser, "Library rescan complete.");
         return true;
@@ -2268,6 +2271,13 @@ int main(int argc, char *argv[]) {
             vfh_sync_poster(&browser);
             vfh_draw_browser(&browser);
         }
+        /* Catastrophe intentionally idles until input (or a clock redraw).
+         * Keep that power-saving behaviour for a settled browser, but wake
+         * often enough to publish a completed scan or lazy poster without
+         * making the user press a button first. */
+        if (!browser.player && (browser.rescan.running ||
+                                browser.poster_state == VFH_THUMB_PENDING))
+            cat_request_frame_in(100);
         cat_present();
     }
 
