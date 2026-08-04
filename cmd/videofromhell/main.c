@@ -1362,16 +1362,18 @@ static void vfh_draw_osd_choice(int x, int y, int w, int h, const char *label, b
                              selected ? theme->text : theme->hint, w - cat_scale(14));
 }
 
-static void vfh_draw_osd_submenu(vfh_browser *browser, SDL_Rect panel) {
+/* Draws into `popup`, which the caller has already cleared of other controls.
+ * The submenu used to be centred over the panel, so the transport glyphs, the
+ * second row and the output pill all bled out around its edges. It now takes
+ * over the lower half of the panel instead of floating above it, and the
+ * caller skips whatever it replaces. */
+static void vfh_draw_osd_submenu(vfh_browser *browser, SDL_Rect popup) {
     const vfh_osd_submenu submenu = browser->osd.submenu;
     TTF_Font *body = cat_get_font(CAT_FONT_MEDIUM);
     TTF_Font *small = cat_get_font(CAT_FONT_SMALL);
     cat_theme *theme = cat_get_theme();
     int inset = cat_scale(12);
-    int popup_h = cat_scale(100);
-    if (popup_h > panel.h - inset * 2) popup_h = panel.h - inset * 2;
-    SDL_Rect popup = { panel.x + inset, panel.y + (panel.h - popup_h) / 2,
-                       panel.w - inset * 2, popup_h };
+    if (popup.w <= inset * 2 || popup.h <= inset * 2) return;
     cat_draw_rounded_rect(popup.x, popup.y, popup.w, popup.h, cat_scale(9),
                           (cat_draw_color){ 9, 10, 14, 248 });
 
@@ -1383,10 +1385,22 @@ static void vfh_draw_osd_submenu(vfh_browser *browser, SDL_Rect panel) {
         case VFH_OSD_SUBMENU_MORE:      title = "More"; break;
         default:                         title = "Controls"; break;
     }
+    /* Header row: title left, exit hint right. Deriving the option row from the
+       measured title height rather than a fixed offset is what stops the two
+       colliding, and pairing them on one row leaves the sheet tall enough for a
+       full-height option row underneath. */
+    int header_h = TTF_FontHeight(body);
     cat_draw_text(body, title, popup.x + inset, popup.y + inset, theme->text);
+    const char *back = vfh_osd_submenu_previews(submenu) ? "A Done  •  B Cancel" : "B Back";
+    int back_w = cat_measure_text(small, back);
+    cat_draw_text(small, back, popup.x + popup.w - inset - back_w,
+                  popup.y + inset + (header_h - TTF_FontHeight(small)) / 2, theme->hint);
 
-    int option_y = popup.y + cat_scale(38);
+    int option_y = popup.y + inset + header_h + cat_scale(8);
     int option_h = cat_scale(30);
+    int option_room = popup.y + popup.h - inset - option_y;
+    if (option_h > option_room) option_h = option_room;
+    if (option_h <= 0) return;
     if (submenu == VFH_OSD_SUBMENU_SUBTITLES) {
         if (!browser->subtitles) {
             cat_draw_text(small, "No external subtitles for this video.", popup.x + inset, option_y,
@@ -1431,10 +1445,6 @@ static void vfh_draw_osd_submenu(vfh_browser *browser, SDL_Rect panel) {
                       popup.x + inset, option_y, theme->hint);
     }
 
-    const char *back = vfh_osd_submenu_previews(submenu) ? "A Done  \u2022  B Cancel" : "B Back";
-    int back_w = cat_measure_text(small, back);
-    cat_draw_text(small, back, popup.x + popup.w - inset - back_w,
-                  popup.y + popup.h - inset - TTF_FontHeight(small), theme->hint);
 }
 
 static void vfh_refresh_osd_capabilities(vfh_browser *browser) {
@@ -1444,6 +1454,51 @@ static void vfh_refresh_osd_capabilities(vfh_browser *browser) {
                              vfh_player_chapter_count(browser->player) > 0);
 }
 
+/* Vertical layout of the playback panel, measured rather than guessed.
+ *
+ * Every row used to carry a hand-tuned offset (+8, +43, +88, +117, +145, +178)
+ * that happened to suit one font size. Any change to one row silently pushed
+ * into the next: the title clipped the output chip, the chip clipped the seek
+ * rail, the hint fell off the panel entirely. Stacking the rows from their own
+ * measured heights makes those collisions impossible to reintroduce, and lets
+ * the panel size itself to its contents. */
+typedef struct {
+    int title_h;        /* title and clock share this row */
+    int chip_h;         /* audio-output chip */
+    int rail_h;         /* seek rail, tall enough for its handle */
+    int bar_h;          /* the rail itself, centred in rail_h */
+    int transport_h;    /* glyph row */
+    int transport_size;
+    int row_h;          /* second row of choices */
+    int footer_h;       /* status and hint */
+    int gap;
+    int inner_pad;
+    int height;         /* total panel height */
+} vfh_osd_metrics;
+
+static vfh_osd_metrics vfh_osd_layout(void) {
+    TTF_Font *body = cat_get_font(CAT_FONT_MEDIUM);
+    TTF_Font *small = cat_get_font(CAT_FONT_SMALL);
+    vfh_osd_metrics m;
+    m.gap = cat_scale(8);
+    m.inner_pad = cat_scale(10);
+    m.title_h = body ? TTF_FontHeight(body) : cat_scale(24);
+    m.footer_h = small ? TTF_FontHeight(small) : cat_scale(18);
+    m.chip_h = m.footer_h + cat_scale(6);
+    m.bar_h = cat_scale(6);
+    /* The scrub handle is a circle centred on the rail; reserve its diameter so
+       it cannot clip the rows above or below. */
+    int handle = cat_scale(7) * 2;
+    m.rail_h = handle > m.bar_h ? handle : m.bar_h;
+    m.transport_size = cat_scale(16);
+    m.transport_h = m.transport_size * 2;
+    m.row_h = cat_scale(28);
+    m.height = m.inner_pad + m.title_h + m.gap + m.chip_h + m.gap + m.rail_h +
+               m.gap + m.transport_h + m.gap + m.row_h + m.gap + m.footer_h +
+               m.inner_pad;
+    return m;
+}
+
 static void vfh_draw_osd(vfh_browser *browser) {
     vfh_refresh_osd_capabilities(browser);
     double position = vfh_player_position(browser->player);
@@ -1451,7 +1506,8 @@ static void vfh_draw_osd(vfh_browser *browser) {
     int screen_w = cat_get_screen_width();
     int screen_h = cat_get_screen_height();
     int pad = cat_scale(16);
-    int panel_h = cat_scale(214);
+    vfh_osd_metrics metrics = vfh_osd_layout();
+    int panel_h = metrics.height;
     int panel_y = screen_h - panel_h - pad;
     SDL_Rect panel = { pad, panel_y, screen_w - pad * 2, panel_h };
     bool pinned = browser->osd.state == VFH_OSD_PINNED;
@@ -1463,7 +1519,9 @@ static void vfh_draw_osd(vfh_browser *browser) {
 
     TTF_Font *body = cat_get_font(CAT_FONT_MEDIUM);
     TTF_Font *small = cat_get_font(CAT_FONT_SMALL);
-    cat_draw_text_ellipsized(body, browser->playing_name, pad * 2, panel_y + cat_scale(8),
+    int cursor = panel_y + metrics.inner_pad;   /* walks down the rows */
+    int title_y = cursor;
+    cat_draw_text_ellipsized(body, browser->playing_name, pad * 2, title_y,
                              (cat_draw_color){ 255, 255, 255, 245 },
                              screen_w - pad * 4 - cat_scale(90));
 
@@ -1473,25 +1531,30 @@ static void vfh_draw_osd(vfh_browser *browser) {
     if (duration > 0.0) snprintf(clock, sizeof(clock), "%s / %s", elapsed, total);
     else                snprintf(clock, sizeof(clock), "%s", elapsed);
     int clock_w = cat_measure_text(small, clock);
-    cat_draw_text(small, clock, screen_w - pad * 2 - clock_w, panel_y + cat_scale(12),
+    /* Baseline-aligned with the title rather than offset into it. */
+    cat_draw_text(small, clock, screen_w - pad * 2 - clock_w,
+                  title_y + (metrics.title_h - metrics.footer_h) / 2,
                   (cat_draw_color){ 210, 210, 210, 230 });
+    cursor += metrics.title_h + metrics.gap;
 
     char output_label[64];
     snprintf(output_label, sizeof(output_label), "Output: %s",
              vfh_audio_output_label(vfh_browser_audio_output(browser)));
     int output_w = cat_measure_text(small, output_label) + cat_scale(16);
-    cat_draw_rounded_rect(pad * 2, panel_y + cat_scale(43), output_w, cat_scale(17),
-                          cat_scale(8), (cat_draw_color){ 42, 45, 56, 220 });
-    cat_draw_text(small, output_label, pad * 2 + cat_scale(8), panel_y + cat_scale(45),
+    cat_draw_rounded_rect(pad * 2, cursor, output_w, metrics.chip_h,
+                          metrics.chip_h / 2, (cat_draw_color){ 42, 45, 56, 220 });
+    cat_draw_text(small, output_label, pad * 2 + cat_scale(8),
+                  cursor + (metrics.chip_h - metrics.footer_h) / 2,
                   (cat_draw_color){ 220, 220, 230, 230 });
+    cursor += metrics.chip_h + metrics.gap;
 
-    /* Scrub bar */
+    /* Scrub bar, centred in a band tall enough for its handle. */
     int bar_x = pad * 2;
     int bar_w = screen_w - pad * 4;
-    /* Keep a distinct visual band below the audio-output pill.  At the MLP1
-       scale the former 17-unit gap put the rail against the pill's lower edge. */
-    int bar_y = panel_y + cat_scale(88);
-    int bar_h = cat_scale(6);
+    int rail_top = cursor;
+    int bar_h = metrics.bar_h;
+    int bar_y = rail_top + (metrics.rail_h - bar_h) / 2;
+    cursor += metrics.rail_h + metrics.gap;
     if (pinned && browser->osd.focus == VFH_OSD_FOCUS_PROGRESS)
         vfh_draw_osd_focus_halo((SDL_Rect){ bar_x - cat_scale(3), bar_y - cat_scale(4),
                                              bar_w + cat_scale(6), bar_h + cat_scale(8) });
@@ -1508,12 +1571,24 @@ static void vfh_draw_osd(vfh_browser *browser) {
                         (cat_draw_color){ 255, 255, 255, 240 });
     }
 
-    vfh_draw_transport(browser, screen_w / 2, panel_y + cat_scale(117), cat_scale(16), pinned);
+    /* Title, clock, output and the seek rail stay visible under a submenu:
+       they are the context you need while changing a setting. Everything below
+       the rail is replaced rather than covered. */
+    if (browser->osd.state == VFH_OSD_SUBMENU) {
+        SDL_Rect sheet = { panel.x + metrics.gap, cursor, panel.w - metrics.gap * 2,
+                           (panel.y + panel.h - metrics.inner_pad) - cursor };
+        vfh_draw_osd_submenu(browser, sheet);
+        return;
+    }
+
+    vfh_draw_transport(browser, screen_w / 2, cursor + metrics.transport_h / 2,
+                       metrics.transport_size, pinned);
+    cursor += metrics.transport_h + metrics.gap;
 
     vfh_osd_focus row_two[5];
     int row_count = vfh_osd_row_two_focuses(&browser->osd, row_two, 5);
-    int row_y = panel_y + cat_scale(145);
-    int row_h = cat_scale(28);
+    int row_y = cursor;
+    int row_h = metrics.row_h;
     int row_gap = cat_scale(5);
     int row_w = (bar_w - row_gap * (row_count - 1)) / row_count;
     for (int i = 0; i < row_count; i++) {
@@ -1522,22 +1597,28 @@ static void vfh_draw_osd(vfh_browser *browser) {
                             pinned && browser->osd.focus == row_two[i]);
     }
 
+    /* Status and hint share one baseline, measured up from the panel's bottom
+       edge so both stay on the scrim. They used to sit 12 units apart, which
+       read as misaligned and pushed the hint off the panel onto the video. */
+    int bottom_y = panel.y + panel.h - metrics.inner_pad - metrics.footer_h;
+    const char *trailing = NULL;
+    cat_draw_color trailing_color = { 214, 214, 226, 235 };
+    if (!vfh_player_has_audio(browser->player)) {
+        trailing = "No audio track";
+    } else if (pinned) {
+        trailing = "A Activate  •  B Close";
+    }
+    int trailing_w = trailing ? cat_measure_text(small, trailing) : 0;
+    if (trailing)
+        cat_draw_text(small, trailing, screen_w - pad * 2 - trailing_w, bottom_y,
+                      trailing_color);
+
     const char *status = browser->message[0] ? browser->message :
                          pinned ? vfh_osd_focus_label(browser->osd.focus) : "Y Controls";
-    cat_draw_text_ellipsized(small, status, bar_x, panel_y + cat_scale(178),
-                             (cat_draw_color){ 205, 205, 215, 220 }, bar_w);
-    if (!vfh_player_has_audio(browser->player)) {
-        const char *silent = "No audio track";
-        int w = cat_measure_text(small, silent);
-        cat_draw_text(small, silent, screen_w - pad * 2 - w, panel_y + cat_scale(190),
-                      (cat_draw_color){ 190, 190, 190, 200 });
-    } else if (pinned) {
-        const char *hint = "A Activate  •  B Close";
-        int w = cat_measure_text(small, hint);
-        cat_draw_text(small, hint, screen_w - pad * 2 - w, panel_y + cat_scale(190),
-                      (cat_draw_color){ 180, 180, 190, 205 });
-    }
-    if (browser->osd.state == VFH_OSD_SUBMENU) vfh_draw_osd_submenu(browser, panel);
+    int status_w = bar_w - (trailing ? trailing_w + cat_scale(12) : 0);
+    if (status_w > 0)
+        cat_draw_text_ellipsized(small, status, bar_x, bottom_y,
+                                 (cat_draw_color){ 205, 205, 215, 220 }, status_w);
 }
 
 /* Subtitles sit above the OSD when it is up, and just above the bottom edge
@@ -1629,8 +1710,11 @@ static void vfh_draw_subtitles(vfh_browser *browser) {
 
     /* Only the vertical placement follows the OSD, so a moving caption still
        reuses the same texture. */
-    int bottom = vfh_playback_osd_visible(browser) ? screen_h - cat_scale(228)
-                                                    : screen_h - cat_scale(24);
+    /* Clear the panel itself rather than a copy of its height, so the caption
+       keeps its gap if the panel ever grows. */
+    int bottom = vfh_playback_osd_visible(browser)
+        ? screen_h - vfh_osd_layout().height - cat_scale(16 + 8)
+        : screen_h - cat_scale(24);
     int y = bottom - (browser->subtitle_h - browser->subtitle_inset * 2);
     if (y < browser->subtitle_inset) y = browser->subtitle_inset;
     SDL_Rect destination = { margin - browser->subtitle_inset, y - browser->subtitle_inset,
