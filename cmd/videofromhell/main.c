@@ -133,6 +133,14 @@ typedef struct {
     vfh_osd osd;
     vfh_srt *subtitles;
     bool subtitles_on;
+    /* One rendered cue, reused until the cue or its layout changes. */
+    SDL_Texture *subtitle_texture;
+    char subtitle_text[512];
+    TTF_Font *subtitle_font;
+    int subtitle_max_w;
+    int subtitle_w;
+    int subtitle_h;
+    int subtitle_inset;
     bool seek_back_held;
     bool seek_forward_held;
     Uint32 seek_last_ms;
@@ -150,6 +158,7 @@ enum { VFH_ASPECT_FIT = 0, VFH_ASPECT_FILL, VFH_ASPECT_STRETCH, VFH_ASPECT_COUNT
 #define VFH_RESUME_SAVE_EVERY_MS 30000
 
 static void vfh_set_message(vfh_browser *browser, const char *message);
+static void vfh_release_subtitle_texture(vfh_browser *browser);
 
 static bool vfh_playback_osd_visible(vfh_browser *browser) {
     vfh_osd_tick(&browser->osd, SDL_GetTicks());
@@ -313,6 +322,7 @@ static void vfh_stop_playback(vfh_browser *browser) {
                                vfh_player_duration(browser->player));
     vfh_srt_free(browser->subtitles);
     browser->subtitles = NULL;
+    vfh_release_subtitle_texture(browser);
     if (browser->video_texture) SDL_DestroyTexture(browser->video_texture);
     browser->video_texture = NULL;
     browser->video_width = browser->video_height = 0;
@@ -1528,6 +1538,73 @@ static void vfh_draw_osd(vfh_browser *browser) {
 /* Subtitles sit above the OSD when it is up, and just above the bottom edge
    otherwise, so the two never overlap. Drawn with an outline pass because a
    plain white line vanishes over a bright frame -- snow, sky, credits. */
+static void vfh_release_subtitle_texture(vfh_browser *browser) {
+    if (!browser) return;
+    if (browser->subtitle_texture) SDL_DestroyTexture(browser->subtitle_texture);
+    browser->subtitle_texture = NULL;
+    browser->subtitle_text[0] = '\0';
+    browser->subtitle_font = NULL;
+    browser->subtitle_max_w = browser->subtitle_w = browser->subtitle_h = 0;
+    browser->subtitle_inset = 0;
+}
+
+/* Rasterise one cue into a single texture.
+ *
+ * The outline is eight offset copies of a wrapped block, and Catastrophe
+ * re-runs its word wrap on every call - measuring a growing prefix per word -
+ * so drawing this straight to the screen cost ten wrap passes per frame. That
+ * is enough main-thread work, next to the frame upload, to miss the vsync
+ * deadline and halve the presented frame rate. Cues change every few seconds,
+ * so the whole block is rendered once and then blitted. */
+static bool vfh_build_subtitle_texture(vfh_browser *browser, const char *text,
+                                       TTF_Font *font, int max_w) {
+    vfh_release_subtitle_texture(browser);
+    if (!text || !text[0] || !font || max_w <= 0) return false;
+    int height = cat_measure_wrapped_text_height(font, text, max_w);
+    if (height <= 0) return false;
+    int inset = cat_scale(2) > 0 ? cat_scale(2) : 1;
+    int width = max_w + inset * 2;
+    height += inset * 2;
+
+    SDL_Renderer *renderer = cat_get_renderer();
+    SDL_Texture *target = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888,
+                                            SDL_TEXTUREACCESS_TARGET, width, height);
+    if (!target) return false;
+    SDL_SetTextureBlendMode(target, SDL_BLENDMODE_BLEND);
+
+    SDL_Texture *previous = SDL_GetRenderTarget(renderer);
+    if (SDL_SetRenderTarget(renderer, target) != 0) {
+        SDL_DestroyTexture(target);
+        return false;
+    }
+    Uint8 r, g, b, a;
+    SDL_GetRenderDrawColor(renderer, &r, &g, &b, &a);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+    SDL_RenderClear(renderer);
+    /* Paid once per cue, so the full eight-direction outline stays: it is what
+       keeps captions legible over snow, sky and credits. */
+    cat_draw_color shadow = { 0, 0, 0, 210 };
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dy = -1; dy <= 1; dy++) {
+            if (!dx && !dy) continue;
+            cat_draw_text_wrapped(font, text, inset + dx * inset, inset + dy * inset,
+                                  max_w, shadow, CAT_ALIGN_CENTER);
+        }
+    cat_draw_text_wrapped(font, text, inset, inset, max_w,
+                          (cat_draw_color){ 255, 255, 255, 255 }, CAT_ALIGN_CENTER);
+    SDL_SetRenderTarget(renderer, previous);
+    SDL_SetRenderDrawColor(renderer, r, g, b, a);
+
+    browser->subtitle_texture = target;
+    snprintf(browser->subtitle_text, sizeof(browser->subtitle_text), "%s", text);
+    browser->subtitle_font = font;
+    browser->subtitle_max_w = max_w;
+    browser->subtitle_w = width;
+    browser->subtitle_h = height;
+    browser->subtitle_inset = inset;
+    return true;
+}
+
 static void vfh_draw_subtitles(vfh_browser *browser) {
     if (!browser->subtitles || !browser->subtitles_on) return;
     const char *text = vfh_srt_text_at(browser->subtitles,
@@ -1539,22 +1616,21 @@ static void vfh_draw_subtitles(vfh_browser *browser) {
     int screen_h = cat_get_screen_height();
     int margin = cat_scale(28);
     int max_w = screen_w - margin * 2;
-    int height = cat_measure_wrapped_text_height(font, text, max_w);
+    if (!browser->subtitle_texture || browser->subtitle_font != font ||
+        browser->subtitle_max_w != max_w ||
+        strcmp(browser->subtitle_text, text) != 0) {
+        if (!vfh_build_subtitle_texture(browser, text, font, max_w)) return;
+    }
+
+    /* Only the vertical placement follows the OSD, so a moving caption still
+       reuses the same texture. */
     int bottom = vfh_playback_osd_visible(browser) ? screen_h - cat_scale(228)
                                                     : screen_h - cat_scale(24);
-    int y = bottom - height;
-    if (y < 0) y = 0;
-
-    const int o = cat_scale(2) > 0 ? cat_scale(2) : 1;
-    cat_draw_color shadow = { 0, 0, 0, 210 };
-    for (int dx = -1; dx <= 1; dx++)
-        for (int dy = -1; dy <= 1; dy++) {
-            if (!dx && !dy) continue;
-            cat_draw_text_wrapped(font, text, margin + dx * o, y + dy * o, max_w,
-                                  shadow, CAT_ALIGN_CENTER);
-        }
-    cat_draw_text_wrapped(font, text, margin, y, max_w,
-                          (cat_draw_color){ 255, 255, 255, 255 }, CAT_ALIGN_CENTER);
+    int y = bottom - (browser->subtitle_h - browser->subtitle_inset * 2);
+    if (y < browser->subtitle_inset) y = browser->subtitle_inset;
+    SDL_Rect destination = { margin - browser->subtitle_inset, y - browser->subtitle_inset,
+                             browser->subtitle_w, browser->subtitle_h };
+    SDL_RenderCopy(cat_get_renderer(), browser->subtitle_texture, NULL, &destination);
 }
 
 static void vfh_draw_playback(vfh_browser *browser) {
