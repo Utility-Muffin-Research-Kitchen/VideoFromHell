@@ -55,6 +55,27 @@ static const char *const VFH_TAB_NAMES[VFH_TAB_COUNT] = {
 
 #define VFH_FOLDER_NAV_MAX 32
 
+/* Row artwork already sitting on disk.
+ *
+ * Generating a poster means opening the file, seeking to 10% and decoding, so
+ * that stays lazy and selection-driven. Art that already exists - a sidecar, or
+ * a thumbnail this browser generated earlier - costs only a load, which is why
+ * the plan allows it to render immediately. This cache holds a screenful of
+ * those so every visible row can show its art, and never triggers generation. */
+#define VFH_ROW_ART_MAX 16
+#define VFH_ROW_ART_MAX_EDGE 192
+/* Loads are throttled per frame: a fast scroll must not turn into a burst of
+ * decodes on the thread that also drives the UI. */
+#define VFH_ROW_ART_LOADS_PER_FRAME 2
+
+typedef struct {
+    char path[VFH_SOURCE_PATH_MAX];
+    SDL_Texture *texture;   /* NULL with `known` set means "nothing on disk yet" */
+    bool used;
+    bool known;
+    unsigned stamp;
+} vfh_row_art;
+
 typedef struct {
     char relative[VFH_LIBRARY_RELATIVE_PATH_MAX];
     bool recordings;
@@ -114,6 +135,9 @@ typedef struct {
     cat_list_state list;
     vfh_thumb_worker thumbs;
     bool thumb_worker_ready;
+    vfh_row_art row_art[VFH_ROW_ART_MAX];
+    unsigned row_art_clock;
+    bool row_art_pending;
     SDL_Texture *poster;
     char poster_path[VFH_ART_PATH_MAX];
     char poster_requested_path[VFH_ART_PATH_MAX];
@@ -162,6 +186,7 @@ enum { VFH_ASPECT_FIT = 0, VFH_ASPECT_FILL, VFH_ASPECT_STRETCH, VFH_ASPECT_COUNT
 
 static void vfh_set_message(vfh_browser *browser, const char *message);
 static void vfh_release_subtitle_texture(vfh_browser *browser);
+static void vfh_row_art_clear(vfh_browser *browser);
 static void vfh_open_osd_submenu(vfh_browser *browser, vfh_osd_submenu submenu);
 static bool vfh_osd_submenu_previews(vfh_osd_submenu submenu);
 
@@ -702,6 +727,8 @@ static bool vfh_rescan_finish(vfh_browser *browser, bool wait) {
            for a cursor move would make a recovered poster look permanently
            failed to the person who requested the rescan. */
         vfh_clear_poster(browser);
+        /* Files may have changed under their cache keys, so re-read row art. */
+        vfh_row_art_clear(browser);
         browser->poster_retry_pending = true;
         vfh_set_message(browser, worker->error[0] ? worker->error : "Library rescan complete.");
         return true;
@@ -766,6 +793,114 @@ static bool vfh_folder_art_path(const vfh_browser *browser, const vfh_entry *ent
     return false;
 }
 
+/* Scaled down on load: a sidecar is whatever size the user dropped beside the
+ * film, and a full-resolution still would cost megabytes per row. */
+static SDL_Texture *vfh_row_art_load(const char *file) {
+    SDL_Surface *surface = IMG_Load(file);
+    if (!surface) return NULL;
+    if (surface->w > VFH_ROW_ART_MAX_EDGE || surface->h > VFH_ROW_ART_MAX_EDGE) {
+        int w = surface->w, h = surface->h;
+        if (w >= h) { h = h * VFH_ROW_ART_MAX_EDGE / w; w = VFH_ROW_ART_MAX_EDGE; }
+        else        { w = w * VFH_ROW_ART_MAX_EDGE / h; h = VFH_ROW_ART_MAX_EDGE; }
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+        SDL_Surface *scaled = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32,
+                                                             SDL_PIXELFORMAT_RGBA32);
+        if (scaled && SDL_BlitScaled(surface, NULL, scaled, NULL) == 0) {
+            SDL_FreeSurface(surface);
+            surface = scaled;
+        } else if (scaled) {
+            SDL_FreeSurface(scaled);
+        }
+    }
+    SDL_Texture *texture = cat_texture_from_surface(surface);
+    SDL_FreeSurface(surface);
+    return texture;
+}
+
+static vfh_row_art *vfh_row_art_find(vfh_browser *browser, const char *path) {
+    for (int i = 0; i < VFH_ROW_ART_MAX; i++) {
+        vfh_row_art *slot = &browser->row_art[i];
+        if (slot->used && strcmp(slot->path, path) == 0) return slot;
+    }
+    return NULL;
+}
+
+static void vfh_row_art_release(vfh_row_art *slot) {
+    if (!slot) return;
+    if (slot->texture) SDL_DestroyTexture(slot->texture);
+    memset(slot, 0, sizeof(*slot));
+}
+
+static void vfh_row_art_clear(vfh_browser *browser) {
+    for (int i = 0; i < VFH_ROW_ART_MAX; i++) vfh_row_art_release(&browser->row_art[i]);
+    browser->row_art_pending = false;
+}
+
+/* Drop one entry so the next sync re-reads it: used when a poster has just been
+ * generated and the file that was missing now exists. */
+static void vfh_row_art_forget(vfh_browser *browser, const char *path) {
+    if (!path || !path[0]) return;
+    vfh_row_art_release(vfh_row_art_find(browser, path));
+}
+
+static vfh_row_art *vfh_row_art_slot(vfh_browser *browser) {
+    vfh_row_art *oldest = &browser->row_art[0];
+    for (int i = 0; i < VFH_ROW_ART_MAX; i++) {
+        vfh_row_art *slot = &browser->row_art[i];
+        if (!slot->used) return slot;
+        if (slot->stamp < oldest->stamp) oldest = slot;
+    }
+    vfh_row_art_release(oldest);
+    return oldest;
+}
+
+/* Fills in art for the rows currently on screen, a couple per frame, using only
+ * files that already exist. Returns true while rows remain unexamined so the
+ * caller can schedule another frame instead of waiting for input. */
+static bool vfh_sync_row_art(vfh_browser *browser) {
+    if (browser->entry_count <= 0) return false;
+    int rows = browser->list.visible_rows > 0 ? browser->list.visible_rows : 1;
+    int first = browser->list.scroll_offset;
+    if (first < 0) first = 0;
+    int last = first + rows;
+    if (last > browser->entry_count) last = browser->entry_count;
+
+    int budget = VFH_ROW_ART_LOADS_PER_FRAME;
+    bool pending = false;
+    for (int i = first; i < last; i++) {
+        const vfh_entry *entry = &browser->entries[i];
+        if (entry->kind != VFH_ENTRY_VIDEO || !entry->path[0]) continue;
+        vfh_row_art *slot = vfh_row_art_find(browser, entry->path);
+        if (slot) {
+            slot->stamp = ++browser->row_art_clock;
+            continue;
+        }
+        if (budget <= 0) { pending = true; continue; }
+        budget--;
+        slot = vfh_row_art_slot(browser);
+        slot->used = true;
+        slot->known = true;
+        slot->stamp = ++browser->row_art_clock;
+        snprintf(slot->path, sizeof(slot->path), "%s", entry->path);
+        char art[VFH_ART_PATH_MAX];
+        if (vfh_art_find_sidecar(entry->path, art, sizeof(art))) {
+            slot->texture = vfh_row_art_load(art);
+            continue;
+        }
+        /* Only an existing thumbnail counts; a miss must not start a decode. */
+        vfh_thumb_cache_path(entry->path, art, sizeof(art));
+        if (access(art, R_OK) == 0) slot->texture = vfh_row_art_load(art);
+    }
+    browser->row_art_pending = pending;
+    return pending;
+}
+
+static SDL_Texture *vfh_row_art_texture(vfh_browser *browser, const char *path) {
+    vfh_row_art *slot = vfh_row_art_find(browser, path);
+    return slot ? slot->texture : NULL;
+}
+
 static void vfh_sync_poster(vfh_browser *browser) {
     if (browser->list.cursor < 0 || browser->list.cursor >= browser->entry_count) {
         vfh_clear_poster(browser);
@@ -816,6 +951,9 @@ static void vfh_sync_poster(vfh_browser *browser) {
         browser->poster = cat_texture_from_surface(surface);
         SDL_FreeSurface(surface);
         if (!browser->poster) browser->poster_state = VFH_THUMB_ERROR;
+        /* The worker has just written this thumbnail, so a row that cached a
+           miss for it can now find one. */
+        vfh_row_art_forget(browser, entry->path);
     }
     if (browser->thumb_worker_ready)
         browser->poster_state = vfh_thumb_worker_state(&browser->thumbs, entry->path);
@@ -937,8 +1075,14 @@ static void vfh_draw_entry(int index, int x, int y, int w, int h,
         cat_draw_color placeholder = theme->hint;
         placeholder.a = 38;
         cat_draw_rounded_rect(x + pad, thumb_y, thumb, thumb, cat_scale(4), placeholder);
-        if (selected && browser->poster && strcmp(browser->poster_path, entry->path) == 0)
-            cat_draw_image_rounded_ex(browser->poster, x + pad, thumb_y, thumb, thumb,
+        /* Cached art first, so unselected rows are not blank. The live poster
+           covers the selected row in the moment between its frame being
+           generated and the cache picking the new file up. */
+        SDL_Texture *art = vfh_row_art_texture(browser, entry->path);
+        if (!art && selected && browser->poster &&
+            strcmp(browser->poster_path, entry->path) == 0) art = browser->poster;
+        if (art)
+            cat_draw_image_rounded_ex(art, x + pad, thumb_y, thumb, thumb,
                                       cat_scale(4), CAT_CORNER_ALL);
         text_x += thumb + pad;
     }
@@ -2635,6 +2779,7 @@ int main(int argc, char *argv[]) {
                 vfh_handle_eof(&browser);
                 if (!browser.player) {
                     vfh_sync_poster(&browser);
+                    (void)vfh_sync_row_art(&browser);
                     vfh_draw_browser(&browser);
                 }
             } else {
@@ -2642,6 +2787,7 @@ int main(int argc, char *argv[]) {
             }
         } else {
             vfh_sync_poster(&browser);
+            (void)vfh_sync_row_art(&browser);
             vfh_draw_browser(&browser);
         }
         /* Catastrophe intentionally idles until input (or a clock redraw).
@@ -2649,6 +2795,7 @@ int main(int argc, char *argv[]) {
          * often enough to publish a completed scan or lazy poster without
          * making the user press a button first. */
         if (!browser.player && (browser.rescan.running ||
+                                browser.row_art_pending ||
                                 browser.poster_state == VFH_THUMB_PENDING))
             cat_request_frame_in(100);
         cat_present();
@@ -2659,6 +2806,7 @@ int main(int argc, char *argv[]) {
     pthread_mutex_destroy(&browser.rescan.mutex);
     vfh_status_monitor_destroy(&browser.audio_status);
     vfh_clear_poster(&browser);
+    vfh_row_art_clear(&browser);
     if (browser.thumb_worker_ready) vfh_thumb_worker_destroy(&browser.thumbs);
     (void)vfh_queue_save(&browser.queue);
     vfh_library_destroy(&browser.catalog);
