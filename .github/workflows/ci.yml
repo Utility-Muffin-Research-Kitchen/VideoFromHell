@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Video From Hell
+        uses: actions/checkout@v4
+        with:
+          path: VideoFromHell
+
+      - name: Read release lock
+        id: release-lock
+        working-directory: VideoFromHell
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          lock = json.load(open("release-lock.json", encoding="utf-8"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"catastrophe_commit={lock['catastrophe_commit']}\n")
+              output.write(f"jawaka_commit={lock['jawaka_commit']}\n")
+              output.write(f"toolchain={lock['mlp1_toolchain_image']}\n")
+          PY
+
+      - name: Checkout pinned Catastrophe
+        uses: actions/checkout@v4
+        with:
+          repository: Utility-Muffin-Research-Kitchen/Catastrophe
+          ref: ${{ steps.release-lock.outputs.catastrophe_commit }}
+          path: Catastrophe
+
+      - name: Checkout pinned Jawaka
+        uses: actions/checkout@v4
+        with:
+          repository: Utility-Muffin-Research-Kitchen/Jawaka
+          ref: ${{ steps.release-lock.outputs.jawaka_commit }}
+          path: Jawaka
+
+      - name: Run host tests
+        working-directory: VideoFromHell
+        run: make test
+
+      - name: Check release scripts
+        working-directory: VideoFromHell
+        run: python3 -m py_compile scripts/*.py
+
+      # Internal PR CI must remain useful while a locally pinned toolchain image
+      # has not yet been published to GHCR. A release tag is deliberately
+      # stricter: release.yml always requires this exact immutable manifest.
+      - name: Check pinned MLP1 toolchain availability
+        id: toolchain
+        env:
+          MLP1_TOOLCHAIN_IMAGE: ${{ steps.release-lock.outputs.toolchain }}
+        run: |
+          if docker manifest inspect "$MLP1_TOOLCHAIN_IMAGE" >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Pinned MLP1 toolchain manifest is unavailable; skipping package smoke in PR CI. Release builds remain strict."
+          fi
+
+      - name: Build and smoke-test the MLP1 package
+        if: steps.toolchain.outputs.available == 'true'
+        working-directory: VideoFromHell
+        env:
+          MLP1_TOOLCHAIN_IMAGE: ${{ steps.release-lock.outputs.toolchain }}
+        run: make package-smoke

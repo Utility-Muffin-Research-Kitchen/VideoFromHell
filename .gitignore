@@ -1,0 +1,16 @@
+build/
+dist/
+ports/*/build/
+ports/*/pak/bin/
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Personal test media is never part of the app package.
+Videos/
+*.mkv
+*.mp4
+*.m4v
+*.mov
+*.avi
+*.webm
