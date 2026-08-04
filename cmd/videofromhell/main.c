@@ -826,6 +826,16 @@ static void vfh_sync_poster(vfh_browser *browser) {
         if (vfh_art_failure_exists(cache, &failure_is_error))
             browser->poster_state = failure_is_error ? VFH_THUMB_ERROR : VFH_THUMB_NOT_FOUND;
     }
+    /* The worker hands its result over exactly once, and keeps the path as its
+       current request afterwards. Leaving a row and coming back therefore drops
+       the texture and then asks for a path the worker considers finished, so
+       nothing arrives and the preview sits on "Creating poster..." forever. Ask
+       again in that state; on a cache hit it is a file load, not a decode. */
+    if (!browser->poster && browser->thumb_worker_ready &&
+        browser->poster_state == VFH_THUMB_READY) {
+        vfh_thumb_worker_retry(&browser->thumbs, entry->path);
+        browser->poster_state = VFH_THUMB_PENDING;
+    }
     if (browser->poster) snprintf(browser->poster_path, sizeof(browser->poster_path), "%s", entry->path);
 }
 
