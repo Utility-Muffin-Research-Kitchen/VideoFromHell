@@ -141,6 +141,9 @@ typedef struct {
     int subtitle_w;
     int subtitle_h;
     int subtitle_inset;
+    /* Value on entry to an OSD submenu, so B can cancel a live preview. */
+    int submenu_entry_aspect;
+    bool submenu_entry_subtitles_on;
     bool seek_back_held;
     bool seek_forward_held;
     Uint32 seek_last_ms;
@@ -159,6 +162,8 @@ enum { VFH_ASPECT_FIT = 0, VFH_ASPECT_FILL, VFH_ASPECT_STRETCH, VFH_ASPECT_COUNT
 
 static void vfh_set_message(vfh_browser *browser, const char *message);
 static void vfh_release_subtitle_texture(vfh_browser *browser);
+static void vfh_open_osd_submenu(vfh_browser *browser, vfh_osd_submenu submenu);
+static bool vfh_osd_submenu_previews(vfh_osd_submenu submenu);
 
 static bool vfh_playback_osd_visible(vfh_browser *browser) {
     vfh_osd_tick(&browser->osd, SDL_GetTicks());
@@ -1426,7 +1431,7 @@ static void vfh_draw_osd_submenu(vfh_browser *browser, SDL_Rect panel) {
                       popup.x + inset, option_y, theme->hint);
     }
 
-    const char *back = "B Back";
+    const char *back = vfh_osd_submenu_previews(submenu) ? "A Done  \u2022  B Cancel" : "B Back";
     int back_w = cat_measure_text(small, back);
     cat_draw_text(small, back, popup.x + popup.w - inset - back_w,
                   popup.y + popup.h - inset - TTF_FontHeight(small), theme->hint);
@@ -2232,16 +2237,16 @@ static void vfh_activate_osd_focus(vfh_browser *browser) {
             vfh_play_adjacent(browser, +1);
             break;
         case VFH_OSD_FOCUS_QUEUE:
-            (void)vfh_osd_open_submenu(&browser->osd, VFH_OSD_SUBMENU_QUEUE);
+            vfh_open_osd_submenu(browser, VFH_OSD_SUBMENU_QUEUE);
             break;
         case VFH_OSD_FOCUS_SUBTITLES:
-            (void)vfh_osd_open_submenu(&browser->osd, VFH_OSD_SUBMENU_SUBTITLES);
+            vfh_open_osd_submenu(browser, VFH_OSD_SUBMENU_SUBTITLES);
             break;
         case VFH_OSD_FOCUS_ASPECT:
-            (void)vfh_osd_open_submenu(&browser->osd, VFH_OSD_SUBMENU_ASPECT);
+            vfh_open_osd_submenu(browser, VFH_OSD_SUBMENU_ASPECT);
             break;
         case VFH_OSD_FOCUS_MORE:
-            (void)vfh_osd_open_submenu(&browser->osd, VFH_OSD_SUBMENU_MORE);
+            vfh_open_osd_submenu(browser, VFH_OSD_SUBMENU_MORE);
             break;
         case VFH_OSD_FOCUS_INFORMATION:
             vfh_show_video_information(browser,
@@ -2255,13 +2260,42 @@ static void vfh_activate_osd_focus(vfh_browser *browser) {
     }
 }
 
+/* Aspect and Subtitles apply live, because seeing the change is the whole
+ * point of them - a deferred form cannot show you the framing. So the submenu
+ * is a preview, and the two exits mean different things: A keeps what you are
+ * looking at, B puts back what you started with. Anything else made A a second
+ * way to cycle the options, which is what made the menu confusing. */
+static void vfh_open_osd_submenu(vfh_browser *browser, vfh_osd_submenu submenu) {
+    if (!vfh_osd_open_submenu(&browser->osd, submenu)) return;
+    browser->submenu_entry_aspect = browser->aspect_mode;
+    browser->submenu_entry_subtitles_on = browser->subtitles_on;
+}
+
+/* True when the submenu previews a value rather than launching a screen. */
+static bool vfh_osd_submenu_previews(vfh_osd_submenu submenu) {
+    return submenu == VFH_OSD_SUBMENU_SUBTITLES || submenu == VFH_OSD_SUBMENU_ASPECT;
+}
+
+static void vfh_cancel_osd_submenu(vfh_browser *browser) {
+    if (browser->osd.state != VFH_OSD_SUBMENU) return;
+    if (browser->osd.submenu == VFH_OSD_SUBMENU_ASPECT &&
+        browser->aspect_mode != browser->submenu_entry_aspect) {
+        browser->aspect_mode = browser->submenu_entry_aspect;
+        vfh_set_message(browser, "Aspect unchanged");
+    } else if (browser->osd.submenu == VFH_OSD_SUBMENU_SUBTITLES &&
+               browser->subtitles_on != browser->submenu_entry_subtitles_on) {
+        browser->subtitles_on = browser->submenu_entry_subtitles_on;
+        vfh_set_message(browser, "Subtitles unchanged");
+    }
+}
+
 static void vfh_activate_osd_submenu(vfh_browser *browser) {
     switch (browser->osd.submenu) {
         case VFH_OSD_SUBMENU_SUBTITLES:
-            vfh_set_subtitles_enabled(browser, !browser->subtitles_on);
-            break;
         case VFH_OSD_SUBMENU_ASPECT:
-            vfh_change_aspect(browser, +1);
+            /* Already applied; A only accepts and leaves. */
+            (void)vfh_osd_back(&browser->osd);
+            vfh_playback_osd_flash(browser);
             break;
         case VFH_OSD_SUBMENU_QUEUE:
             vfh_show_queue(browser);
@@ -2424,6 +2458,7 @@ int main(int argc, char *argv[]) {
                         vfh_play_adjacent(&browser, +1);
                         break;
                     case CAT_BTN_B:
+                        vfh_cancel_osd_submenu(&browser);
                         if (!vfh_osd_back(&browser.osd)) {
                             vfh_stop_playback(&browser);
                             vfh_set_message(&browser, "Returned to the video library.");
