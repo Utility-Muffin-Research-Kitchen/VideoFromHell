@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "catastrophe_commit": "e1ddd5dcb1d0f4d37df1db811e7133a2f53109a7",
+  "catastrophe_commit": "91b44894334c407828ff65d80f0fb062044bf048",
   "jawaka_commit": "e74262ae722f389af727d0085d64c1359b0c7b53",
   "mlp1_toolchain_image": "ghcr.io/utility-muffin-research-kitchen/mlp1-toolchain@sha256:c06561c60b9bed6aa2bec35bdce5d4ebc9894dc3f23ed1a16c43d8da8fc43419"
 }
