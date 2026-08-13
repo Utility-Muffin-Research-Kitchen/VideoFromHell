@@ -1,6 +1,6 @@
 {
   "schema": 1,
   "catastrophe_commit": "49680a9cf1e87b8e14d970cb56c9aed6f6ff30c5",
-  "jawaka_commit": "e74262ae722f389af727d0085d64c1359b0c7b53",
-  "mlp1_toolchain_image": "ghcr.io/utility-muffin-research-kitchen/mlp1-toolchain@sha256:c06561c60b9bed6aa2bec35bdce5d4ebc9894dc3f23ed1a16c43d8da8fc43419"
+  "jawaka_commit": "043e7bb1d3dbd367917ac9741b54baac6af04b45",
+  "mlp1_toolchain_image": "ghcr.io/utility-muffin-research-kitchen/mlp1-toolchain@sha256:fb735b6f7392409940242d20a692504093226ffd32c2d3029ff677e448b3a588"
 }

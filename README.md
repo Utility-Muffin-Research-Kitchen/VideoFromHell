@@ -93,7 +93,7 @@ make -C VideoFromHell media-smoke-mlp1
 make -C VideoFromHell media-fixture-smoke-mlp1
 ```
 
-`vfh-probe`, `vfh-player-smoke`, and `vfh-media-smoke` are target-only acceptance tools, intentionally outside the pak. The media smoke tool exercises VFH's own metadata and lazy-poster path, rather than an external `ffmpeg` command. `media-fixture-smoke-mlp1` additionally generates disposable target-side clips for the dark-frame retry, short clip, low-resolution gameplay, embedded-art, all-black, and corrupt-file cases. Regenerate the FFmpeg and MPP link stubs after changing their symbol surface with `./scripts/build-ffmpeg-link-stubs.sh`.
+`vfh-probe`, `vfh-player-smoke`, and `vfh-media-smoke` are target-only acceptance tools, intentionally outside the pak. The media smoke tool exercises VFH's own metadata and lazy-poster path, rather than an external `ffmpeg` command. `media-fixture-smoke-mlp1` additionally generates disposable clips for the dark-frame retry, short clip, low-resolution gameplay, embedded-art, all-black, and corrupt-file cases. Those are encoded on the host with your own `ffmpeg` (override with `VFH_FFMPEG_BIN`) and pushed to the device, because the Leaf payload only carries an `ffmpeg` binary when retroarch-builds has produced one. Regenerate the FFmpeg and MPP link stubs after changing their symbol surface with `./scripts/build-ffmpeg-link-stubs.sh`.
 
 ## Credits
 
