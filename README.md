@@ -13,7 +13,7 @@ Browse one merged local library spanning both SD cards and Leaf's recorded-gamep
 
 H.264 and HEVC video use the MLP1's Rockchip MPP hardware decoder. MP4 packets are converted to Annex-B for MPP, decoded to NV12, and uploaded directly to an SDL NV12 texture. Other formats retain the FFmpeg software decoder path when the device can open them. Audio is decoded through FFmpeg and output over ALSA, following Leaf's current sound route.
 
-The pak ships its own trimmed FFmpeg 4.4 build in `lib/`, so it plays the same on LoongOS 1.3, which has FFmpeg 4.4 in `/usr/lib`, and 1.4, which replaced it with 6.1. Rockchip MPP still comes from the device. The compact libraries in `third_party/*/stub` are link-time metadata only. AV1 is not decoded: the stock 4.4 did that through libdav1d, which the bundled build does not include.
+The pak ships its own trimmed FFmpeg 4.4 build in `lib/`, so it plays the same on LoongOS 1.3, which has FFmpeg 4.4 in `/usr/lib`, and 1.4, which replaced it with 6.1. Rockchip MPP still comes from the device. The compact libraries in `third_party/*/stub` are link-time metadata only. AV1 decodes in software through dav1d, linked into the bundled libavcodec as the stock 4.4 did.
 
 ## Install
 
