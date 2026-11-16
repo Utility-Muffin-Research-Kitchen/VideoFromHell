@@ -112,6 +112,7 @@ struct vfh_player {
 
     pthread_mutex_t state_mutex;
     double clock_seconds;
+    uint32_t clock_anchor_ms;
     bool clock_valid;
     uint32_t wall_anchor_ms;
     double wall_anchor_seconds;
@@ -300,9 +301,18 @@ static double vfh_seconds_from_timestamp(int64_t timestamp, AVRational time_base
     return (double)timestamp * (double)time_base.num / (double)time_base.den;
 }
 
+/* The audio clock is measured only after each ALSA write, and writes land in
+   bursts longer than a video frame. Read between them, a stepped clock makes
+   "newest due frame" drop about every other frame, so it advances with
+   elapsed time since its last measurement. The cap stops it running away when
+   writes stall (route change, underrun) or the device drains at end of file:
+   0.3 s covers the 200 ms ALSA buffer plus a burst. */
+#define VFH_CLOCK_MAX_EXTRAPOLATION 0.3
+
 static void vfh_set_clock(vfh_player *player, double seconds, bool valid) {
     pthread_mutex_lock(&player->state_mutex);
     player->clock_seconds = seconds < 0.0 ? 0.0 : seconds;
+    player->clock_anchor_ms = SDL_GetTicks();
     player->clock_valid = valid;
     pthread_mutex_unlock(&player->state_mutex);
 }
@@ -311,7 +321,11 @@ static double vfh_clock(vfh_player *player) {
     pthread_mutex_lock(&player->state_mutex);
     double seconds;
     if (atomic_load(&player->paused)) seconds = player->paused_seconds;
-    else if (player->audio_stream >= 0 && player->clock_valid) seconds = player->clock_seconds;
+    else if (player->audio_stream >= 0 && player->clock_valid) {
+        double elapsed = (double)(SDL_GetTicks() - player->clock_anchor_ms) / 1000.0;
+        if (elapsed > VFH_CLOCK_MAX_EXTRAPOLATION) elapsed = VFH_CLOCK_MAX_EXTRAPOLATION;
+        seconds = player->clock_seconds + elapsed;
+    }
     else seconds = player->wall_anchor_seconds +
                    (double)(SDL_GetTicks() - player->wall_anchor_ms) / 1000.0;
     pthread_mutex_unlock(&player->state_mutex);
@@ -895,6 +909,12 @@ void vfh_player_set_paused(vfh_player *player, bool paused) {
         pthread_mutex_unlock(&player->state_mutex);
         atomic_store(&player->paused, true);
     } else {
+        /* Restart the audio clock's elapsed time from the paused position, or
+           the time spent paused would count as playback. */
+        pthread_mutex_lock(&player->state_mutex);
+        player->clock_seconds = player->paused_seconds;
+        player->clock_anchor_ms = SDL_GetTicks();
+        pthread_mutex_unlock(&player->state_mutex);
         atomic_store(&player->paused, false);
         vfh_set_wall_anchor(player, vfh_clock(player));
     }
