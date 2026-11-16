@@ -112,6 +112,7 @@ struct vfh_player {
 
     pthread_mutex_t state_mutex;
     double clock_seconds;
+    uint32_t clock_anchor_ms;
     bool clock_valid;
     uint32_t wall_anchor_ms;
     double wall_anchor_seconds;
@@ -300,9 +301,18 @@ static double vfh_seconds_from_timestamp(int64_t timestamp, AVRational time_base
     return (double)timestamp * (double)time_base.num / (double)time_base.den;
 }
 
+/* The audio clock is measured only after each ALSA write, and writes land in
+   bursts longer than a video frame. Read between them, a stepped clock makes
+   "newest due frame" drop about every other frame, so it advances with
+   elapsed time since its last measurement. The cap stops it running away when
+   writes stall (route change, underrun) or the device drains at end of file:
+   0.3 s covers the 200 ms ALSA buffer plus a burst. */
+#define VFH_CLOCK_MAX_EXTRAPOLATION 0.3
+
 static void vfh_set_clock(vfh_player *player, double seconds, bool valid) {
     pthread_mutex_lock(&player->state_mutex);
     player->clock_seconds = seconds < 0.0 ? 0.0 : seconds;
+    player->clock_anchor_ms = SDL_GetTicks();
     player->clock_valid = valid;
     pthread_mutex_unlock(&player->state_mutex);
 }
@@ -311,7 +321,11 @@ static double vfh_clock(vfh_player *player) {
     pthread_mutex_lock(&player->state_mutex);
     double seconds;
     if (atomic_load(&player->paused)) seconds = player->paused_seconds;
-    else if (player->audio_stream >= 0 && player->clock_valid) seconds = player->clock_seconds;
+    else if (player->audio_stream >= 0 && player->clock_valid) {
+        double elapsed = (double)(SDL_GetTicks() - player->clock_anchor_ms) / 1000.0;
+        if (elapsed > VFH_CLOCK_MAX_EXTRAPOLATION) elapsed = VFH_CLOCK_MAX_EXTRAPOLATION;
+        seconds = player->clock_seconds + elapsed;
+    }
     else seconds = player->wall_anchor_seconds +
                    (double)(SDL_GetTicks() - player->wall_anchor_ms) / 1000.0;
     pthread_mutex_unlock(&player->state_mutex);
@@ -663,12 +677,20 @@ static void *vfh_demux_thread_main(void *opaque) {
 }
 
 static bool vfh_open_decoder(AVFormatContext *format, int stream_index,
-                             AVCodecContext **out_context) {
+                             bool threaded, AVCodecContext **out_context) {
     *out_context = NULL;
     if (stream_index < 0) return true;
     AVCodec *codec = avcodec_find_decoder(format->streams[stream_index]->codecpar->codec_id);
     if (!codec) return false;
     AVCodecContext *context = avcodec_alloc_context3(codec);
+    if (context && threaded) {
+        /* FFmpeg defaults to one decoding thread. Software video (VP9, AV1
+           through dav1d, MPEG-4, ...) gets every core instead: one A55 cannot
+           keep up with 1080p. The added frame delay is drained at EOF and
+           dropped by avcodec_flush_buffers() on seek. */
+        context->thread_count = 0;
+        context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
     if (!context ||
         avcodec_parameters_to_context(context, format->streams[stream_index]->codecpar) < 0 ||
         avcodec_open2(context, codec, NULL) < 0) {
@@ -838,7 +860,7 @@ bool vfh_player_open(vfh_player *player, const char *path, char *error, int erro
         (!vfh_mpp_decoder_open(&player->mpp,
                                player->format->streams[player->video_stream]->codecpar,
                                player->format->streams[player->video_stream]->time_base) &&
-         !vfh_open_decoder(player->format, player->video_stream, &player->video_codec))) goto failed;
+         !vfh_open_decoder(player->format, player->video_stream, true, &player->video_codec))) goto failed;
     if (player->mpp)
         fprintf(stderr, "videofromhell: using direct MPP video decode\n");
     player->video_time_base = player->format->streams[player->video_stream]->time_base;
@@ -850,7 +872,7 @@ bool vfh_player_open(vfh_player *player, const char *path, char *error, int erro
        must not make an otherwise-playable video refuse to open. Drop the audio
        stream and run video-only off the wall clock instead. */
     if (player->audio_stream >= 0 &&
-        (!vfh_open_decoder(player->format, player->audio_stream, &player->audio_codec) ||
+        (!vfh_open_decoder(player->format, player->audio_stream, false, &player->audio_codec) ||
          !vfh_open_audio_output(player))) {
         fprintf(stderr, "videofromhell: audio unavailable; playing video only\n");
         if (player->pcm) { snd_pcm_close(player->pcm); player->pcm = NULL; }
@@ -887,6 +909,12 @@ void vfh_player_set_paused(vfh_player *player, bool paused) {
         pthread_mutex_unlock(&player->state_mutex);
         atomic_store(&player->paused, true);
     } else {
+        /* Restart the audio clock's elapsed time from the paused position, or
+           the time spent paused would count as playback. */
+        pthread_mutex_lock(&player->state_mutex);
+        player->clock_seconds = player->paused_seconds;
+        player->clock_anchor_ms = SDL_GetTicks();
+        pthread_mutex_unlock(&player->state_mutex);
         atomic_store(&player->paused, false);
         vfh_set_wall_anchor(player, vfh_clock(player));
     }

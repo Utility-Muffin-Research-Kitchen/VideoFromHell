@@ -12,6 +12,8 @@ if [ "${VFH_SKIP_LINK_STUBS:-0}" != "1" ]; then
   "$SCRIPT_DIR/build-ffmpeg-link-stubs.sh"
 fi
 
+"$SCRIPT_DIR/build-mlp1-ffmpeg.sh"
+
 targets=("$@")
 if [ "${#targets[@]}" -eq 0 ]; then
   targets=(all)

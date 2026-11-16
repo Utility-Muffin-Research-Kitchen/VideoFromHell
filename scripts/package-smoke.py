@@ -6,11 +6,65 @@ import hashlib
 import json
 import pathlib
 import stat
+import struct
 import zipfile
 
 
 def fail(message: str) -> None:
     raise SystemExit(f"package-smoke: {message}")
+
+
+FFMPEG_LIBS = {
+    "libavformat.so.58", "libavcodec.so.58", "libavutil.so.56",
+    "libswresample.so.3", "libswscale.so.5",
+}
+# MPP stays the firmware's, so the binary keeps /usr/lib after its own lib/.
+BINARY_RUNPATH = "$ORIGIN/../lib:/usr/lib"
+
+
+def elf_dynamic(path: pathlib.Path) -> tuple[list[str], str | None]:
+    """Return (DT_NEEDED names, DT_RUNPATH) of a little-endian ELF64 file."""
+    data = path.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        fail(f"{path.name} is not a little-endian ELF64 file")
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    for _name, kind, _flags, _addr, offset, size, link, _info, _align, entsize in sections:
+        if kind != 6:  # SHT_DYNAMIC
+            continue
+        strtab = sections[link]
+        def string(at: int) -> str:
+            start = strtab[4] + at
+            return data[start:data.index(b"\0", start)].decode()
+        needed, runpath = [], None
+        for at in range(offset, offset + size, entsize):
+            tag, value = struct.unpack_from("<qQ", data, at)
+            if tag == 1:
+                needed.append(string(value))
+            elif tag == 29:
+                runpath = string(value)
+        return needed, runpath
+    fail(f"{path.name} has no dynamic section")
+
+
+def check_ffmpeg_runtime(package: pathlib.Path, binary_path: pathlib.Path) -> None:
+    lib_dir = package / "lib"
+    shipped = {path.name for path in lib_dir.iterdir()} if lib_dir.is_dir() else set()
+    if shipped != FFMPEG_LIBS:
+        fail(f"lib/ must hold exactly {sorted(FFMPEG_LIBS)}, found {sorted(shipped)}")
+    if not (package / "licenses" / "FFmpeg" / "COPYING.LGPLv2.1").is_file():
+        fail("missing licenses/FFmpeg/COPYING.LGPLv2.1")
+    if not (package / "licenses" / "FFmpeg" / "FFMPEG-SOURCE.txt").is_file():
+        fail("missing licenses/FFmpeg/FFMPEG-SOURCE.txt")
+    objects = [(binary_path, BINARY_RUNPATH)] + [(lib_dir / name, "$ORIGIN") for name in sorted(shipped)]
+    for path, wanted in objects:
+        needed, runpath = elf_dynamic(path)
+        if runpath != wanted:
+            fail(f"{path.name} RUNPATH is {runpath!r}, want {wanted!r}")
+        missing = [name for name in needed if name.startswith(("libav", "libsw")) and name not in shipped]
+        if missing:
+            fail(f"{path.name} needs FFmpeg libraries the pak does not ship: {missing}")
 
 
 def main() -> None:
@@ -38,6 +92,7 @@ def main() -> None:
         fail("manifest platform must be mlp1")
     if binary_path.read_bytes()[:4] != b"\x7fELF":
         fail("videofromhell is not an ELF binary")
+    check_ffmpeg_runtime(package, binary_path)
     if not archive.is_file():
         fail("archive is missing")
 

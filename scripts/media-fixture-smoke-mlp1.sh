@@ -21,7 +21,8 @@ fi
 
 ADB=(adb -s "$SERIAL")
 FIXTURE_DIR="/tmp/vfh-media-fixture-$$"
-REMOTE_SMOKE="$FIXTURE_DIR/vfh-media-smoke"
+# bin/ + lib/ mirrors the pak, so RUNPATH $ORIGIN/../lib finds the bundled FFmpeg.
+REMOTE_SMOKE="$FIXTURE_DIR/bin/vfh-media-smoke"
 LOCAL_DIR="$(mktemp -d)"
 
 cleanup() {
@@ -47,8 +48,9 @@ ff -i "$LOCAL_DIR/short.mp4" -i "$LOCAL_DIR/cover.png" \
    "$LOCAL_DIR/embedded-art.mp4"
 printf 'not media\n' > "$LOCAL_DIR/corrupt.mp4"
 
-"${ADB[@]}" shell "rm -rf '$FIXTURE_DIR' && mkdir -p '$FIXTURE_DIR'"
+"${ADB[@]}" shell "rm -rf '$FIXTURE_DIR' && mkdir -p '$FIXTURE_DIR/bin' '$FIXTURE_DIR/lib'"
 "${ADB[@]}" push "$LOCAL_DIR/." "$FIXTURE_DIR/" >/dev/null
+"${ADB[@]}" push "$ROOT_DIR/build/mlp1/ffmpeg/lib/." "$FIXTURE_DIR/lib/" >/dev/null
 "${ADB[@]}" push "$ROOT_DIR/build/mlp1/vfh-media-smoke" "$REMOTE_SMOKE" >/dev/null
 "${ADB[@]}" shell "chmod 755 '$REMOTE_SMOKE'"
 

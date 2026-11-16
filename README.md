@@ -13,7 +13,7 @@ Browse one merged local library spanning both SD cards and Leaf's recorded-gamep
 
 H.264 and HEVC video use the MLP1's Rockchip MPP hardware decoder. MP4 packets are converted to Annex-B for MPP, decoded to NV12, and uploaded directly to an SDL NV12 texture. Other formats retain the FFmpeg software decoder path when the device can open them. Audio is decoded through FFmpeg and output over ALSA, following Leaf's current sound route.
 
-The pak contains neither FFmpeg nor Rockchip MPP. It links against the exact vendor FFmpeg 4.4 and MPP SONAMEs already present on the device; the compact libraries in `third_party/*/stub` are link-time metadata only.
+The pak ships its own trimmed FFmpeg 4.4 build in `lib/`, so it plays the same on LoongOS 1.3, which has FFmpeg 4.4 in `/usr/lib`, and 1.4, which replaced it with 6.1. Rockchip MPP still comes from the device. The compact libraries in `third_party/*/stub` are link-time metadata only. AV1 decodes in software through dav1d, linked into the bundled libavcodec as the stock 4.4 did.
 
 ## Install
 
@@ -95,6 +95,8 @@ make -C VideoFromHell media-fixture-smoke-mlp1
 
 `vfh-probe`, `vfh-player-smoke`, and `vfh-media-smoke` are target-only acceptance tools, intentionally outside the pak. The media smoke tool exercises VFH's own metadata and lazy-poster path, rather than an external `ffmpeg` command. `media-fixture-smoke-mlp1` additionally generates disposable clips for the dark-frame retry, short clip, low-resolution gameplay, embedded-art, all-black, and corrupt-file cases. Those are encoded on the host with your own `ffmpeg` (override with `VFH_FFMPEG_BIN`) and pushed to the device, because the Leaf payload only carries an `ffmpeg` binary when retroarch-builds has produced one. Regenerate the FFmpeg and MPP link stubs after changing their symbol surface with `./scripts/build-ffmpeg-link-stubs.sh`.
 
+`scripts/build-mlp1-ffmpeg.sh` (run by every MLP1 build) fetches the pinned FFmpeg 4.4.8 release, checks its SHA-256, and builds the shared libraries in the toolchain container with `ports/mlp1/build-ffmpeg.sh`. The result is cached in `build/mlp1/ffmpeg/` and packaged into the pak's `lib/`; binaries find it through their `$ORIGIN/../lib` RUNPATH, so the acceptance tools run from a `bin/` directory next to a copy of that `lib/`.
+
 ## Credits
 
-FFmpeg is dynamically linked to the LGPL components already shipped by the device. Rockchip MPP is dynamically linked to the device vendor runtime. Catastrophe and Leaf are UMRK projects; see [LICENSE](LICENSE) for this app's MIT license.
+FFmpeg (LGPL-2.1-or-later) is shipped as unmodified shared libraries in the pak's `lib/`; its license and the exact source and configure line are in `licenses/FFmpeg/`. Rockchip MPP is dynamically linked to the device vendor runtime. Catastrophe and Leaf are UMRK projects; see [LICENSE](LICENSE) for this app's MIT license.
