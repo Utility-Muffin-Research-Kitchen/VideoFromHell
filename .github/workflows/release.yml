@@ -97,7 +97,8 @@ jobs:
           checksum_file="build/mlp1/SHA256SUMS"
           notes="build/mlp1/release-notes.md"
           sha256sum "$artifact" > "$checksum_file"
-          printf '# Video From Hell %s\n\nInternal package validated for Miniloong Pocket 1.\n\n## SHA-256\n\n```\n' "$GITHUB_REF_NAME" > "$notes"
+          cp "docs/release-notes-$GITHUB_REF_NAME.md" "$notes"
+          printf '\n## SHA-256\n\n```\n' >> "$notes"
           cat "$checksum_file" >> "$notes"
           printf '```\n' >> "$notes"
           gh release create "$GITHUB_REF_NAME" \
