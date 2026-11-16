@@ -7,6 +7,7 @@
 MLP1_PACKAGE := build/mlp1/package/VideoFromHell.pak
 MLP1_ARCHIVE := build/mlp1/VideoFromHell.pak.zip
 MLP1_BIN     := ports/mlp1/pak/bin/videofromhell
+MLP1_FFMPEG  := build/mlp1/ffmpeg
 PAK_VERSION  := $(shell python3 -c 'import json; print(json.load(open("pak/pak.json"))["pak_version"])')
 
 CJSON_DIR ?= ../Jawaka/third_party/cjson
@@ -120,11 +121,15 @@ media-smoke-mlp1:
 media-fixture-smoke-mlp1: media-smoke-mlp1
 	@./scripts/media-fixture-smoke-mlp1.sh
 
+# The pak carries its own FFmpeg (lib/) plus its license and source notice
+# (licenses/FFmpeg/); see scripts/build-mlp1-ffmpeg.sh.
 package-mlp1: mlp1
 	@rm -rf "$(MLP1_PACKAGE)"
-	@mkdir -p "$(MLP1_PACKAGE)/bin"
+	@mkdir -p "$(MLP1_PACKAGE)/bin" "$(MLP1_PACKAGE)/lib" "$(MLP1_PACKAGE)/licenses/FFmpeg"
 	@cp -R pak/launch.sh pak/pak.json pak/res "$(MLP1_PACKAGE)/"
 	@cp "$(MLP1_BIN)" "$(MLP1_PACKAGE)/bin/videofromhell"
+	@cp $(MLP1_FFMPEG)/lib/*.so.* "$(MLP1_PACKAGE)/lib/"
+	@cp $(MLP1_FFMPEG)/licenses/* "$(MLP1_PACKAGE)/licenses/FFmpeg/"
 	@echo "=== Packaged: $(MLP1_PACKAGE) ==="
 
 package-archive: package-mlp1

@@ -20,16 +20,20 @@ INCLUDES := -I$(SRC) -I$(FFMPEG)/include -I$(MPP)/include -I$(CATA)/include -I$(
 PLATFORM_DEFINES := -DPLATFORM_MLP1
 APP_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -O2 -Wall -Wextra -Wno-unused-parameter $(PLATFORM_DEFINES) $(INCLUDES)
 VENDOR_CFLAGS := -std=c11 -D_DEFAULT_SOURCE -O2 -w $(PLATFORM_DEFINES) $(INCLUDES)
-FFMPEG_LIBS := -L$(FFMPEG)/stub -Wl,-rpath,/usr/lib \
+# FFmpeg comes from the pak's own lib/ (scripts/build-mlp1-ffmpeg.sh), found
+# through RUNPATH $ORIGIN/../lib ahead of /usr/lib: LoongOS 1.3 ships FFmpeg 4.4
+# there, 1.4 ships 6.1. MPP still comes from the firmware's /usr/lib.
+FFMPEG_RPATH := -Wl,-rpath,'$$ORIGIN/../lib' -Wl,--enable-new-dtags
+FFMPEG_LIBS := -L$(FFMPEG)/stub $(FFMPEG_RPATH) \
 	-Wl,-l:libavformat.so.58 -Wl,-l:libavcodec.so.58 -Wl,-l:libavutil.so.56 \
 	-Wl,-l:libswresample.so.3 -Wl,-l:libswscale.so.5
-PROBE_FFMPEG_LIBS := -L$(FFMPEG)/stub -Wl,-rpath,/usr/lib \
+PROBE_FFMPEG_LIBS := -L$(FFMPEG)/stub $(FFMPEG_RPATH) \
 	-Wl,-l:libavformat.so.58 -Wl,-l:libavcodec.so.58 -Wl,-l:libavutil.so.56
 MPP_LIBS := -L$(MPP)/stub -Wl,-rpath,/usr/lib -Wl,-l:librockchip_mpp.so.1
 LDFLAGS  := -L$(SYSROOT)/usr/lib -lSDL2 -lSDL2_ttf -lSDL2_image -lasound -lm -lpthread $(FFMPEG_LIBS) $(MPP_LIBS)
 
-# The actual decoder remains the vendor runtime: these SONAME stubs record the
-# FFmpeg 4.4 ABI at link time and are never packaged into the pak.
+# The SONAME stubs record the FFmpeg 4.4 and MPP ABI at link time and are never
+# packaged; the pak ships the real FFmpeg 4.4 libraries in lib/.
 OBJ := $(OBJDIR)/main.o $(OBJDIR)/vfh_sources.o $(OBJDIR)/vfh_library.o $(OBJDIR)/vfh_queue.o $(OBJDIR)/vfh_status.o $(OBJDIR)/vfh_osd.o $(OBJDIR)/vfh_art.o $(OBJDIR)/vfh_media.o \
 	$(OBJDIR)/vfh_thumb.o $(OBJDIR)/vfh_player.o $(OBJDIR)/vfh_mpp.o \
 	$(OBJDIR)/vfh_inhibit.o $(OBJDIR)/vfh_resume.o $(OBJDIR)/vfh_srt.o \
