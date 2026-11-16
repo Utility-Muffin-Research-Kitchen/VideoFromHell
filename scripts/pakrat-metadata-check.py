@@ -37,6 +37,8 @@ require(package.get("runtime_manifest_path") == "pak.json", "unexpected manifest
 require(package.get("package_dir") == "build/mlp1/package/VideoFromHell.pak", "unexpected package dir")
 require(package.get("build_command") == ["make", "package-platform", "PLATFORM=mlp1"], "unexpected build command")
 
+require((ROOT / f"docs/release-notes-v{package.get('version')}.md").is_file(),
+        "missing docs/release-notes-v<version>.md for the release workflow")
 require(re.fullmatch(r"[0-9a-f]{40}", str(release_lock.get("catastrophe_commit", ""))) is not None,
         "Catastrophe commit must be a full SHA")
 require(re.fullmatch(r"[0-9a-f]{40}", str(release_lock.get("jawaka_commit", ""))) is not None,

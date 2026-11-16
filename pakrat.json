@@ -14,7 +14,7 @@
     "packages": [
       {
         "platform": "mlp1",
-        "version": "0.3.1",
+        "version": "0.3.2",
         "artifact_name": "VideoFromHell.pak.zip",
         "install_name": "VideoFromHell.pak",
         "runtime_manifest_path": "pak.json",
