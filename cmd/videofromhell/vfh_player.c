@@ -663,12 +663,20 @@ static void *vfh_demux_thread_main(void *opaque) {
 }
 
 static bool vfh_open_decoder(AVFormatContext *format, int stream_index,
-                             AVCodecContext **out_context) {
+                             bool threaded, AVCodecContext **out_context) {
     *out_context = NULL;
     if (stream_index < 0) return true;
     AVCodec *codec = avcodec_find_decoder(format->streams[stream_index]->codecpar->codec_id);
     if (!codec) return false;
     AVCodecContext *context = avcodec_alloc_context3(codec);
+    if (context && threaded) {
+        /* FFmpeg defaults to one decoding thread. Software video (VP9, AV1
+           through dav1d, MPEG-4, ...) gets every core instead: one A55 cannot
+           keep up with 1080p. The added frame delay is drained at EOF and
+           dropped by avcodec_flush_buffers() on seek. */
+        context->thread_count = 0;
+        context->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
     if (!context ||
         avcodec_parameters_to_context(context, format->streams[stream_index]->codecpar) < 0 ||
         avcodec_open2(context, codec, NULL) < 0) {
@@ -838,7 +846,7 @@ bool vfh_player_open(vfh_player *player, const char *path, char *error, int erro
         (!vfh_mpp_decoder_open(&player->mpp,
                                player->format->streams[player->video_stream]->codecpar,
                                player->format->streams[player->video_stream]->time_base) &&
-         !vfh_open_decoder(player->format, player->video_stream, &player->video_codec))) goto failed;
+         !vfh_open_decoder(player->format, player->video_stream, true, &player->video_codec))) goto failed;
     if (player->mpp)
         fprintf(stderr, "videofromhell: using direct MPP video decode\n");
     player->video_time_base = player->format->streams[player->video_stream]->time_base;
@@ -850,7 +858,7 @@ bool vfh_player_open(vfh_player *player, const char *path, char *error, int erro
        must not make an otherwise-playable video refuse to open. Drop the audio
        stream and run video-only off the wall clock instead. */
     if (player->audio_stream >= 0 &&
-        (!vfh_open_decoder(player->format, player->audio_stream, &player->audio_codec) ||
+        (!vfh_open_decoder(player->format, player->audio_stream, false, &player->audio_codec) ||
          !vfh_open_audio_output(player))) {
         fprintf(stderr, "videofromhell: audio unavailable; playing video only\n");
         if (player->pcm) { snd_pcm_close(player->pcm); player->pcm = NULL; }
