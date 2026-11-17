@@ -24,7 +24,10 @@ mkdir -p "$PAK_DIR/bin" "$WRITABLE_USERDATA" "$WRITABLE_CARD"
 : >"$INVALID_LOGS"
 cp "$ROOT_DIR/pak/launch.sh" "$PAK_DIR/launch.sh"
 chmod +x "$PAK_DIR/launch.sh"
-ln -s "$(command -v env)" "$PAK_DIR/bin/videofromhell"
+# A script, not a symlink to env: multicall coreutils (uutils on Ubuntu
+# 26.04) refuses to run when invoked under a name that is not its own.
+printf '#!/bin/sh\nexec env\n' >"$PAK_DIR/bin/videofromhell"
+chmod +x "$PAK_DIR/bin/videofromhell"
 
 OUTPUT="$(
   PLATFORM=vfh-launch-smoke \
